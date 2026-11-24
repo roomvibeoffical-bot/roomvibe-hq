@@ -346,8 +346,8 @@ function invitePanel() {
   const inv = (data.invites || []).filter(i => !data.users.some(u => String(u.email || "").toLowerCase() === i.id));
   return `<div class="panel" style="margin-top:16px"><h3>Give access by email</h3>
   <div class="row"><input id="invEmail" type="email" placeholder="Their Gmail address" style="flex:1;min-width:200px" aria-label="Gmail address"><select id="invRole" style="width:auto" aria-label="Role">${roleOpts.map(r => `<option value="${r}" ${r === "supervisor" ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select><button class="btn primary" id="invAdd">Give access</button></div>
-  <p class="muted" style="font-size:12.5px;margin:8px 0 0">Send them the app link. When they sign in with this Gmail, their app opens straight away with this role.</p>
-  ${inv.length ? `<div style="margin-top:12px">${inv.map(i => `<div class="row spread" style="padding:8px 0;border-top:1px solid var(--line)"><span style="word-break:break-all">${esc(i.id)} · <span class="pill">${esc(ROLE_LABEL[i.role] || i.role)}</span> <span class="muted">not signed in yet</span></span><button class="btn danger" data-uninvite="${esc(i.id)}">Remove</button></div>`).join("")}</div>` : ""}</div>`;
+  <p class="muted" style="font-size:12.5px;margin:8px 0 0">They get an invitation email within a few minutes. When they sign in with this Gmail, their app opens straight away with this role.</p>
+  ${inv.length ? `<div style="margin-top:12px">${inv.map(i => `<div class="row spread" style="padding:8px 0;border-top:1px solid var(--line)"><span style="word-break:break-all">${esc(i.id)} · <span class="pill">${esc(ROLE_LABEL[i.role] || i.role)}</span> <span class="muted">${i.emailSent === true ? "invite email sent" : i.emailSent === "error" ? "email failed, check the address" : "email being sent"} · not signed in yet</span></span><button class="btn danger" data-uninvite="${esc(i.id)}">Remove</button></div>`).join("")}</div>` : ""}</div>`;
 }
 async function addInvite() {
   const em = (document.getElementById("invEmail").value || "").trim().toLowerCase(), role = document.getElementById("invRole").value;
