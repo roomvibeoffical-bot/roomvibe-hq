@@ -17,9 +17,11 @@ jobs:
           node-version: 20
       - name: Install Firebase Admin
         working-directory: notify
-        run: npm install --no-save --no-audit --no-fund firebase-admin@12.7.0
+        run: npm install --no-save --no-audit --no-fund firebase-admin@12.7.0 nodemailer@6.9.16
       - name: Send notifications
         working-directory: notify
         run: node notify.mjs
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
