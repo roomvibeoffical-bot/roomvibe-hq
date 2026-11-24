@@ -19,7 +19,7 @@ const auth = getAuth(fb);
 const db = getFirestore(fb);
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({ prompt: "select_account" });
-const VAPID_KEY = ""; // Web Push public key from Firebase > Project settings > Cloud Messaging
+const VAPID_KEY = "BJmHqvGb0sSEH8r15gC9MaIt63dY6ZJqw-l4tmIbDfwgYB63v6Z4qrWUPoByCXVU77A_0-WCsTTRJVrUN5RbP9Y"; // Web Push public key from Firebase > Project settings > Cloud Messaging
 
 // ---------- constants ----------
 const STAGES = ["New lead", "Quotation sent", "Advance paid", "Delivery scheduled", "Delivered", "Lost"];
@@ -116,7 +116,9 @@ onAuthStateChanged(auth, async u => {
     const snap = await getDoc(ref);
     if (!snap.exists()) {
       const boot = u.emailVerified && BOOT_OWNERS.includes(String(u.email || "").toLowerCase());
-      await setDoc(ref, { name: u.displayName || u.email, email: u.email, photo: u.photoURL || "", role: boot ? "owner" : "pending", active: !!boot, createdAt: nowISO() });
+      let role = boot ? "owner" : "pending";
+      if (!boot && u.emailVerified) { try { const inv = await getDoc(doc(db, "invites", String(u.email || "").toLowerCase())); if (inv.exists() && inv.data().role) role = inv.data().role; } catch (e) {} }
+      await setDoc(ref, { name: u.displayName || u.email, email: u.email, photo: u.photoURL || "", role, active: role !== "pending", createdAt: nowISO() });
     }
   } catch (e) { renderLogin("Couldn't open your account: " + esc(e.code || "error") + ". Try again."); return; }
   meUnsub = onSnapshot(ref, s => {
@@ -147,6 +149,7 @@ function subscribe() {
   if (fullTasks()) listen(collection(db, "tasks"), s => data.tasks = toArr(s));
   else listen(query(collection(db, "tasks"), where("assigneeUid", "==", uid)), s => data.tasks = toArr(s));
   if (isAdmin()) ["suppliers", "payments", "expenses"].forEach(c => listen(collection(db, c), s => data[c] = toArr(s)));
+  if (isAdmin()) listen(collection(db, "invites"), s => data.invites = toArr(s));
 }
 
 // ---------- tabs ----------
@@ -338,6 +341,27 @@ function vExpenses() {
 }
 
 // ---------- team & access (owner/admin) ----------
+function invitePanel() {
+  const roleOpts = R === "owner" ? ["admin", "manager", "sales", "supervisor", "marketing", "owner"] : ["admin", "manager", "sales", "supervisor", "marketing"];
+  const inv = (data.invites || []).filter(i => !data.users.some(u => String(u.email || "").toLowerCase() === i.id));
+  return `<div class="panel" style="margin-top:16px"><h3>Give access by email</h3>
+  <div class="row"><input id="invEmail" type="email" placeholder="Their Gmail address" style="flex:1;min-width:200px" aria-label="Gmail address"><select id="invRole" style="width:auto" aria-label="Role">${roleOpts.map(r => `<option value="${r}" ${r === "supervisor" ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select><button class="btn primary" id="invAdd">Give access</button></div>
+  <p class="muted" style="font-size:12.5px;margin:8px 0 0">Send them the app link. When they sign in with this Gmail, their app opens straight away with this role.</p>
+  ${inv.length ? `<div style="margin-top:12px">${inv.map(i => `<div class="row spread" style="padding:8px 0;border-top:1px solid var(--line)"><span style="word-break:break-all">${esc(i.id)} · <span class="pill">${esc(ROLE_LABEL[i.role] || i.role)}</span> <span class="muted">not signed in yet</span></span><button class="btn danger" data-uninvite="${esc(i.id)}">Remove</button></div>`).join("")}</div>` : ""}</div>`;
+}
+async function addInvite() {
+  const em = (document.getElementById("invEmail").value || "").trim().toLowerCase(), role = document.getElementById("invRole").value;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { setMsg("Enter a valid Gmail address.", true); return; }
+  try {
+    const existing = data.users.find(u => String(u.email || "").toLowerCase() === em);
+    if (existing) {
+      if (existing.id === user.uid) { setMsg("That is your own account.", true); return; }
+      await updateDoc(doc(db, "users", existing.id), { role, active: true }); setMsg(existing.name + " is now " + ROLE_LABEL[role] + "."); return;
+    }
+    await setDoc(doc(db, "invites", em), { role, invitedBy: user.uid, createdAt: nowISO() });
+    setMsg(em + " can now sign in as " + ROLE_LABEL[role] + ".");
+  } catch (err) { setMsg(errText(err), true); }
+}
 function vTeam() {
   const order = u => u.role === "pending" ? 0 : u.active ? 1 : 2;
   const list = [...data.users].sort((a, b) => order(a) - order(b) || String(a.name).localeCompare(String(b.name)));
@@ -354,7 +378,7 @@ function vTeam() {
     ${!u.active && u.role !== "pending" ? `<div class="muted" style="font-size:12px">Access is off.</div>` : ""}</div>`;
   };
   return `<div class="row spread"><h2>Team &amp; Access</h2>${pending ? `<span class="pill warn">${pending} waiting for access</span>` : ""}</div>
-  <div class="members">${list.map(card).join("")}</div>
+  ${invitePanel()}<div class="members">${list.map(card).join("")}</div>
   <div class="grid2" style="margin-top:18px">
    <div class="panel"><h3>Add a new team member</h3><ol class="steps">
     <li>Send them the app link.</li>
@@ -553,6 +577,9 @@ document.addEventListener("keydown", e => {
 // ---------- events ----------
 app.addEventListener("click", async e => {
   if (e.target.closest("#pushOn")) { enablePush(); return; }
+  if (e.target.closest("#invAdd")) { addInvite(); return; }
+  const ui = e.target.closest("[data-uninvite]");
+  if (ui) { if (!ui.classList.contains("armed")) { ui.classList.add("armed"); ui.textContent = "Tap again to remove"; return; } try { await deleteDoc(doc(db, "invites", ui.dataset.uninvite)); } catch (err) { setMsg(errText(err), true); } return; }
   const t = e.target.closest("[data-add],[data-edit],[data-stage],[data-who],[data-done],[data-toggle]"); if (!t) return;
   if (t.dataset.done !== undefined) {
     const x = byId(data.tasks, t.dataset.done); if (!x) return; t.disabled = true;
