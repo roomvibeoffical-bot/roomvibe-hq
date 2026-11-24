@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function bootOwnerEmail() {
+      return request.auth.token.email_verified == true
+        && request.auth.token.email in ['roomvibeoffical@gmail.com', 'irfanaligroumaskhan@gmail.com'];
+    }
+    function myDoc() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function role() {
+      return exists(myDoc()) && get(myDoc()).data.active == true ? get(myDoc()).data.role : 'none';
+    }
+    function isAny(roles) { return signedIn() && role() in roles; }
+    function isOwner() { return isAny(['owner']); }
+    function isAdmin() { return isAny(['owner', 'admin']); }
+    function isStaff() { return isAny(['owner', 'admin', 'manager', 'sales', 'supervisor', 'marketing']); }
+
+    // ---------- team members ----------
+    match /users/{userId} {
+      allow read: if signedIn() && (userId == uid() || isStaff());
+      allow create: if signedIn() && userId == uid()
+        && request.resource.data.keys().hasOnly(['name', 'email', 'photo', 'role', 'active', 'createdAt'])
+        && request.resource.data.email == request.auth.token.email
+        && ((request.resource.data.role == 'pending' && request.resource.data.active == false)
+            || (bootOwnerEmail() && request.resource.data.role == 'owner' && request.resource.data.active == true));
+      allow update: if signedIn() && (
+          (userId == uid() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photo', 'lastSeen']))
+          || (isOwner() && userId != uid())
+          || (isAdmin() && resource.data.role != 'owner' && request.resource.data.role != 'owner' && userId != uid())
+        );
+      allow delete: if isOwner() && userId != uid();
+    }
+
+    // ---------- customers / deals (no money here) ----------
+    match /deals/{id} {
+      allow read: if isAny(['owner', 'admin', 'manager', 'sales', 'marketing']);
+      allow create: if isAny(['owner', 'admin', 'manager', 'sales']) && request.resource.data.createdBy == uid();
+      allow update: if isAny(['owner', 'admin', 'manager'])
+        || (isAny(['sales']) && resource.data.ownerUid in [uid(), '']);
+      allow delete: if isAdmin();
+    }
+
+    // ---------- deal money (value, received) ----------
+    match /dealMoney/{id} {
+      allow read: if isAny(['owner', 'admin', 'manager'])
+        || (isAny(['sales']) && resource.data.ownerUid == uid());
+      allow create, update: if isAny(['owner', 'admin', 'manager'])
+        || (isAny(['sales']) && request.resource.data.ownerUid == uid()
+            && (resource == null || resource.data.ownerUid in [uid(), '']));
+      allow delete: if isAdmin();
+    }
+
+    // ---------- tasks / deliveries / visits ----------
+    match /tasks/{id} {
+      allow read: if isAny(['owner', 'admin', 'manager', 'sales'])
+        || (isAny(['supervisor', 'marketing']) && resource.data.assigneeUid == uid());
+      allow create: if isAny(['owner', 'admin', 'manager', 'sales']);
+      allow update: if isAny(['owner', 'admin', 'manager', 'sales'])
+        || (isAny(['supervisor', 'marketing']) && resource.data.assigneeUid == uid()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'doneAt', 'report', 'updatedAt', 'updatedBy']));
+      allow delete: if isAny(['owner', 'admin', 'manager']);
+    }
+
+    // ---------- money: owner + admin only ----------
+    match /suppliers/{id} { allow read, write: if isAdmin(); }
+    match /payments/{id}  { allow read, write: if isAdmin(); }
+    match /expenses/{id}  { allow read, write: if isAdmin(); }
+
+    // everything else is closed
+  }
+}
