@@ -154,11 +154,11 @@ function subscribe() {
 
 // ---------- tabs ----------
 function tabs() {
-  if (isAdmin()) return [["dashboard", "Dashboard"], ["deals", "Customers & Deals"], ["tasks", "Tasks & Deliveries"], ["suppliers", "Suppliers"], ["expenses", "Expenses & Ads"], ["team", "Team & Access"]];
-  if (is("manager")) return [["deals", "Customers & Deals"], ["tasks", "Tasks & Deliveries"]];
-  if (is("sales")) return [["tasks", "My Work"], ["deals", "Customers & Deals"]];
+  if (isAdmin()) return [["dashboard", "Dashboard"], ["calendar", "Calendar"], ["deals", "Customers & Deals"], ["tasks", "Tasks & Deliveries"], ["suppliers", "Suppliers"], ["expenses", "Expenses & Ads"], ["team", "Team & Access"]];
+  if (is("manager")) return [["calendar", "Calendar"], ["deals", "Customers & Deals"], ["tasks", "Tasks & Deliveries"]];
+  if (is("sales")) return [["tasks", "My Work"], ["calendar", "Calendar"], ["deals", "Customers & Deals"]];
   if (is("marketing")) return [["deals", "Leads"], ["tasks", "My Work"]];
-  if (is("supervisor")) return [["tasks", "My Work"]];
+  if (is("supervisor")) return [["tasks", "My Work"], ["calendar", "Calendar"]];
   return [];
 }
 window.addEventListener("hashchange", render);
@@ -191,7 +191,7 @@ function render() {
   }
   const keepQ = document.activeElement && document.activeElement.id === "q";
   const hdr = header();
-  const fn = { dashboard: vDash, deals: vDeals, tasks: vTasks, suppliers: vSuppliers, expenses: vExpenses, team: vTeam }[state.view];
+  const fn = { dashboard: vDash, calendar: vCalendar, deals: vDeals, tasks: vTasks, suppliers: vSuppliers, expenses: vExpenses, team: vTeam }[state.view];
   app.innerHTML = hdr + `<main class="wrap">${state.msg ? `<div class="note ${state.msgBad ? "bad" : ""}">${esc(state.msg)}</div>` : ""}<section id="view">${fn ? fn() : ""}</section></main>`;
   document.getElementById("so").onclick = () => signOut(auth);
   if (keepQ) { const q = document.getElementById("q"); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
@@ -266,6 +266,7 @@ function vDash() {
     ${people.length ? people.map(r => `<tr><td>${esc(r.u.name)}</td><td class="n">${r.leads}</td><td class="n">${r.orders}</td><td class="n">${aed(r.sales)}</td></tr>`).join("") : emptyRow(4, "Give someone the Sales role in Team &amp; Access.")}</tbody></table></div></div>
    <div class="panel"><h3>Open pipeline (all dates)</h3><div class="tbl"><table><thead><tr><th>Stage</th><th class="n">Deals</th><th class="n">Value</th></tr></thead><tbody>
     ${pipe.map(x => `<tr><td>${stagePill(x.s)}</td><td class="n">${x.c}</td><td class="n">${aed(x.v)}</td></tr>`).join("")}</tbody></table></div></div>
+   <div class="panel"><h3>Deliveries · next 7 days</h3>${(() => { const u = data.tasks.filter(x => x.type === "Delivery" && x.status !== "Done" && x.due && x.due >= t && x.due <= addDays(t, 7)).sort((p, q) => (p.due + (p.time || "")).localeCompare(q.due + (q.time || ""))); return u.length ? u.slice(0, 8).map(taskRow).join("") : `<div class="empty">No deliveries in the next 7 days.</div>`; })()}</div>
    <div class="panel"><h3>Due today or overdue</h3>${due.length ? due.slice(0, 8).map(taskRow).join("") : `<div class="empty">Nothing due.</div>`}</div>
   </div>`;
 }
@@ -391,6 +392,126 @@ function vTeam() {
   </div>`;
 }
 
+// ---------- calendar ----------
+const calCss = document.createElement("style");
+calCss.textContent = `
+.cal-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 14px}
+.cal-head h2{min-width:160px;text-align:center}
+.cal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cal .dow{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);text-align:center;padding:4px 0}
+.cal .day{background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:88px;padding:6px;cursor:pointer;display:flex;flex-direction:column;gap:4px;text-align:left;font:inherit;color:inherit;min-width:0}
+.cal .day.out{opacity:.35}
+.cal .day.today{border-color:var(--accent);border-width:2px}
+.cal .day.sel{outline:2px solid var(--brand);outline-offset:1px}
+.cal .num{font-weight:700;font-size:13px}
+.cal .chip2{font-size:11px;border-radius:5px;padding:1px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cal .c-del{background:var(--brand);color:var(--brand-ink)}
+.cal .c-vis{background:var(--soft);color:var(--ink);border:1px solid var(--line)}
+.cal .c-deal{background:var(--accent);color:#fff}
+.legend2{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
+.legend2 i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.items{display:grid;gap:6px}
+.items .it{display:grid;grid-template-columns:1fr 70px 1fr 44px;gap:6px}
+.items .it input{padding:7px 8px}
+.itemlist{margin:4px 0 0;padding-left:18px}
+@media (max-width:560px){.cal{gap:3px}.cal .day{min-height:56px;padding:4px;gap:3px}.cal .chip2{font-size:0;padding:0;height:6px;border-radius:3px}.items .it{grid-template-columns:1fr 60px}}
+`;
+document.head.appendChild(calCss);
+function monthAdd(ym, k) { const [y, m] = ym.split("-").map(Number); const d = new Date(y, m - 1 + k, 1); return d.getFullYear() + "-" + pad(d.getMonth() + 1); }
+function calEntries(date) {
+  const tasks = data.tasks.filter(t => t.due === date);
+  const deals = is("supervisor", "marketing") ? [] : data.deals.filter(d => d.closeDate === date && WON.has(d.stage));
+  return { tasks, deals };
+}
+function vCalendar() {
+  if (!state.calMonth) state.calMonth = today().slice(0, 7);
+  if (!state.calDay) state.calDay = today();
+  const ym = state.calMonth, [y, m] = ym.split("-").map(Number);
+  const first = new Date(y, m - 1, 1), lead = (first.getDay() + 6) % 7, start = addDays(iso(first), -lead), t = today();
+  let cells = "";
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(start, i);
+    if (i % 7 === 0 && i > 0 && d.slice(0, 7) !== ym) break;
+    const e = calEntries(d), del = e.tasks.filter(x => x.type === "Delivery"), oth = e.tasks.filter(x => x.type !== "Delivery");
+    const chips = (del.length ? `<span class="chip2 c-del">${del.length} deliver${del.length > 1 ? "ies" : "y"}</span>` : "")
+      + (oth.length ? `<span class="chip2 c-vis">${oth.length} visit${oth.length > 1 ? "s" : ""}</span>` : "")
+      + (e.deals.length ? `<span class="chip2 c-deal">${e.deals.length} deal${e.deals.length > 1 ? "s" : ""} done</span>` : "");
+    cells += `<button class="day ${d.slice(0, 7) !== ym ? "out" : ""} ${d === t ? "today" : ""} ${d === state.calDay ? "sel" : ""}" data-day="${d}" aria-label="${esc(fmtLong(d))}"><span class="num">${Number(d.slice(8))}</span>${chips}</button>`;
+  }
+  const title = first.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  return `<div class="cal-head"><button class="btn" data-cal="-1" aria-label="Previous month">‹</button><h2>${esc(title)}</h2><button class="btn" data-cal="1" aria-label="Next month">›</button><button class="btn" data-cal="0">Today</button></div>
+  <div class="cal">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(x => `<div class="dow">${x}</div>`).join("")}${cells}</div>
+  <div class="legend2"><span><i style="background:var(--brand)"></i>Delivery</span><span><i style="background:var(--soft);border:1px solid var(--line)"></i>Site visit / task</span>${is("supervisor", "marketing") ? "" : `<span><i style="background:var(--accent)"></i>Deal done</span>`}</div>
+  ${dayPanel(state.calDay)}`;
+}
+function dayPanel(date) {
+  const e = calEntries(date), canAdd = fullTasks();
+  const tasks = e.tasks.slice().sort((p, q) => (p.time || "99").localeCompare(q.time || "99"));
+  return `<div class="panel" style="margin-top:16px"><div class="row spread"><h2>${esc(fmtLong(date))}</h2>${canAdd ? `<button class="btn primary" data-newdel="${date}">+ Add delivery / deal</button>` : ""}</div>
+  ${tasks.length ? `<div style="margin-top:8px">${tasks.map(taskRow).join("")}</div>` : `<div class="empty">${canAdd ? "Nothing on this day. Tap “+ Add delivery / deal” to add one." : "Nothing on this day."}</div>`}
+  ${e.deals.length ? `<h3 style="margin-top:16px">Deals done this day</h3>${e.deals.map(d => `<div class="task"><div class="body" data-edit="deals" data-id="${esc(d.id)}" tabindex="0"><div class="t">${esc(d.customer)}${d.package ? " · " + esc(d.package) : ""}</div><div class="m">${stagePill(d.stage)} ${esc(userName(d.ownerUid))}${hasMoney(d) ? " · " + aed(dealVal(d)) : ""}</div></div></div>`).join("")}` : ""}</div>`;
+}
+function itemRow(i, disabled) {
+  const dis = disabled ? "disabled" : "";
+  return `<div class="it"><input class="in" placeholder="Item (e.g. 3-seater sofa)" value="${esc(i.name || "")}" ${dis} aria-label="Item"><input class="iq" type="number" min="1" inputmode="numeric" placeholder="Qty" value="${esc(i.qty || "")}" ${dis} aria-label="Quantity"><input class="nt" placeholder="Colour / size / note" value="${esc(i.note || "")}" ${dis} aria-label="Item note">${disabled ? "<span></span>" : `<button type="button" class="btn" data-delitem aria-label="Remove item">✕</button>`}</div>`;
+}
+function itemsEditor(items, disabled) {
+  const list = Array.isArray(items) && items.length ? items : [{}];
+  return `<div class="items" id="itemsBox">${list.map(i => itemRow(i, disabled)).join("")}</div>${disabled ? "" : `<button type="button" class="btn" id="addItem" style="margin-top:6px;align-self:flex-start">+ Add item</button>`}`;
+}
+function readItems() {
+  return [...document.querySelectorAll("#itemsBox .it")].map(r => ({ name: r.querySelector(".in").value.trim(), qty: num(r.querySelector(".iq").value) || 1, note: r.querySelector(".nt").value.trim() })).filter(i => i.name).slice(0, 60);
+}
+function itemsHtml(items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<div><span class="muted">Items:</span><ul class="itemlist">${items.map(i => `<li>${esc(i.qty || 1)} × ${esc(i.name)}${i.note ? " — " + esc(i.note) : ""}</li>`).join("")}</ul></div>`;
+}
+function openDelivery(date) {
+  const moneyOK = is("owner", "admin", "manager", "sales");
+  const F = [
+    { k: "customer", l: "Customer name", t: "text", req: 1 },
+    { k: "phone", l: "Customer phone", t: "tel" },
+    { k: "area", l: "Area / building / unit", t: "text" },
+    { k: "location", l: "Google Maps link or full address", t: "text", wide: 1 },
+    { k: "package", l: "Package", t: "text", list: PACKAGES },
+    { k: "source", l: "Source (ref code)", t: "select", opts: SOURCES, def: "Unknown" },
+    { k: "items", l: "Items to deliver", t: "items", wide: 1 },
+    { k: "quoteUrl", l: "Quotation link (Google Drive / PDF)", t: "url", wide: 1 },
+    { k: "due", l: "Delivery date", t: "date", def: date },
+    { k: "time", l: "Delivery time", t: "time" },
+    { k: "assigneeUid", l: "Supervisor", t: "user", roles: ["supervisor", "manager", "admin", "owner"] },
+    { k: "closeDate", l: "Deal confirmed on", t: "date", def: today() },
+    ...(moneyOK ? [{ k: "value", l: "Deal value (AED)", t: "num" }, { k: "paid", l: "Received so far (AED)", t: "num" }] : []),
+    { k: "notes", l: "Notes for supervisor", t: "area" }];
+  modal.innerHTML = `<div class="scrim" data-close="1"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mt"><div class="row spread"><h2 id="mt">New delivery · ${esc(fmtLong(date))}</h2><button class="btn" data-close="1" aria-label="Close">✕</button></div>
+  <p class="muted" style="margin:6px 0 0">Saves the customer deal and puts the delivery on the supervisor's calendar.</p>
+  <form id="frm" class="form">${F.map(f => fieldHtml(f, f.def || (f.t === "items" ? [] : ""), false)).join("")}</form><div class="err" id="ferr"></div>
+  <div class="row spread" style="margin-top:8px"><span></span><div class="row"><button class="btn" data-close="1" type="button">Cancel</button><button class="btn primary" id="sv" type="button">Save delivery</button></div></div></div></div>`;
+  modal.hidden = false;
+  document.getElementById("f_customer").focus();
+  const sv = document.getElementById("sv"), err = document.getElementById("ferr");
+  sv.onclick = async () => {
+    const v = {};
+    for (const f of F) {
+      if (f.t === "items") { v.items = readItems(); continue; }
+      const el = document.getElementById("f_" + f.k); let x = el.value.trim(); if (f.t === "num") x = x === "" ? "" : num(x);
+      v[f.k] = x;
+      if (f.req && !x) { err.textContent = f.l + " is required."; el.focus(); return; }
+    }
+    if (!v.due) { err.textContent = "Delivery date is required."; return; }
+    sv.disabled = true; sv.textContent = "Saving…"; err.textContent = "";
+    try {
+      const stamp = { updatedAt: nowISO(), updatedBy: user.uid }, owner = is("sales") ? user.uid : "";
+      const dealId = doc(collection(db, "deals")).id;
+      await setDoc(doc(db, "deals", dealId), Object.assign({ customer: v.customer, phone: v.phone, area: v.area, location: v.location, package: v.package, source: v.source, items: v.items, quoteUrl: v.quoteUrl, stage: "Delivery scheduled", ownerUid: owner, date: v.closeDate || today(), closeDate: v.closeDate || today(), deliveryDate: v.due, notes: v.notes, createdAt: nowISO(), createdBy: user.uid }, stamp));
+      if (moneyOK && (v.value !== "" || v.paid !== "")) await setDoc(doc(db, "dealMoney", dealId), { value: v.value === "" ? 0 : v.value, paid: v.paid === "" ? 0 : v.paid, ownerUid: owner, updatedAt: stamp.updatedAt });
+      const title = ("Delivery: " + (v.package || (v.items[0] && v.items[0].name) || "order") + " — " + v.customer).slice(0, 120);
+      await setDoc(doc(collection(db, "tasks")), Object.assign({ title, type: "Delivery", assigneeUid: v.assigneeUid, due: v.due, time: v.time, dealId, customer: v.customer, phone: v.phone, area: v.area, location: v.location, items: v.items, quoteUrl: v.quoteUrl, notes: v.notes, status: "Open", report: "", doneAt: "", notified: false, remindEve: false, remindDay: false, createdAt: nowISO(), createdBy: user.uid }, stamp));
+      closeForm(); state.calDay = v.due; state.calMonth = v.due.slice(0, 7); setMsg("Delivery saved for " + fmtLong(v.due) + ".");
+    } catch (e) { sv.disabled = false; sv.textContent = "Save delivery"; err.textContent = errText(e); }
+  };
+}
+
 // ---------- forms ----------
 const SCHEMAS = {
   deals: { label: "customer / deal", fields: [
@@ -402,6 +523,8 @@ const SCHEMAS = {
     { k: "stage", l: "Stage", t: "select", opts: STAGES, def: "New lead" },
     { k: "value", l: "Deal value (AED)", t: "num", money: 1 },
     { k: "paid", l: "Received so far (AED)", t: "num", money: 1 },
+    { k: "items", l: "Items", t: "items", wide: 1 },
+    { k: "quoteUrl", l: "Quotation link (Google Drive / PDF)", t: "url", wide: 1 },
     { k: "ownerUid", l: "Sales person", t: "user", roles: ["sales", "manager", "admin", "owner"], def: () => is("sales") ? user.uid : "" },
     { k: "date", l: "Lead date", t: "date", def: today },
     { k: "closeDate", l: "Order confirmed on", t: "date", hint: "Fills itself when stage moves to Advance paid" },
@@ -418,6 +541,8 @@ const SCHEMAS = {
     { k: "phone", l: "Customer phone", t: "tel" },
     { k: "area", l: "Area / building / unit", t: "text" },
     { k: "location", l: "Google Maps link or full address", t: "text", wide: 1 },
+    { k: "items", l: "Items to deliver", t: "items", wide: 1 },
+    { k: "quoteUrl", l: "Quotation link (Google Drive / PDF)", t: "url", wide: 1 },
     { k: "notes", l: "Details / what to do", t: "area" },
     { k: "status", l: "Status", t: "select", opts: ["Open", "Done"], def: "Open" },
     { k: "report", l: "Report from site", t: "area" }] },
@@ -442,6 +567,7 @@ const SCHEMAS = {
 function fieldHtml(f, val, disabled) {
   const fid = "f_" + f.k, dis = disabled ? "disabled" : ""; let inp;
   if (f.t === "select") inp = `<select id="${fid}" ${dis}>${f.opts.map(o => `<option ${o === val ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+  else if (f.t === "items") inp = itemsEditor(val, disabled);
   else if (f.t === "area") inp = `<textarea id="${fid}" ${dis}>${esc(val)}</textarea>`;
   else if (f.t === "deal") inp = `<select id="${fid}" ${dis}><option value="">— none —</option>${[...data.deals].sort((x, y) => String(x.customer).localeCompare(String(y.customer))).map(d => `<option value="${esc(d.id)}" ${d.id === val ? "selected" : ""}>${esc(d.customer)}${d.area ? " · " + esc(d.area) : ""}</option>`).join("")}</select>`;
   else if (f.t === "user") { const us = activeStaff().filter(u => !f.roles || f.roles.includes(u.role)); inp = `<select id="${fid}" ${dis}><option value="">— unassigned —</option>${us.map(u => `<option value="${esc(u.id)}" ${u.id === val ? "selected" : ""}>${esc(u.name)} · ${esc(ROLE_LABEL[u.role] || "")}</option>`).join("")}</select>`; }
@@ -460,8 +586,8 @@ function taskDetail(t) {
   const tel = String(t.phone || "").replace(/[^\d+]/g, ""), map = mapUrl(t), a = 'style="text-decoration:none"';
   const line = (k, v) => v ? `<div><span class="muted">${k}:</span> ${esc(v)}</div>` : "";
   return `<div class="detail"><div class="row spread"><strong>${esc(t.type || "Task")} · ${t.due ? esc(fmtLong(t.due)) : "No date"}${t.time ? " · " + esc(fmtTime(t.time)) : ""}</strong><span class="pill">${esc(userName(t.assigneeUid) || "Unassigned")}</span></div>
-  ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}
-  <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
+  ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}${itemsHtml(t.items)}
+  <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${String(t.quoteUrl || "").startsWith("https://") ? `<a class="btn" ${a} href="${esc(t.quoteUrl)}" target="_blank" rel="noopener">Quotation</a>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
 }
 let pushState = "";
 function pushIsOn() { let t = ""; try { t = localStorage.getItem("rvhq-push") || ""; } catch (e) {} return pushState === "on" || (window.Notification && Notification.permission === "granted" && t && me && (me.fcmTokens || []).includes(t)); }
@@ -517,6 +643,7 @@ function openForm(kind, id) {
   if (sv) sv.onclick = async () => {
     const vals = {};
     for (const f of fields) {
+      if (f.t === "items") { vals[f.k] = editable ? readItems() : (values[f.k] || []); continue; }
       const el = document.getElementById("f_" + f.k); let v = el.value.trim(); if (f.t === "num") v = v === "" ? "" : num(v);
       if (f.fixed) v = values[f.k] || (is("sales") ? user.uid : "");
       vals[f.k] = v;
@@ -568,7 +695,12 @@ async function saveRecord(kind, rec, vals, limited) {
   await setDoc(doc(db, kind, id), Object.assign(base, vals, stamp));
 }
 function closeForm() { modal.hidden = true; modal.innerHTML = ""; }
-modal.addEventListener("click", e => { if (e.target.dataset && e.target.dataset.close) closeForm(); });
+modal.addEventListener("click", e => {
+  if (e.target.dataset && e.target.dataset.close) { closeForm(); return; }
+  if (e.target.id === "addItem") { document.getElementById("itemsBox").insertAdjacentHTML("beforeend", itemRow({}, false)); const r = document.querySelectorAll("#itemsBox .it .in"); r[r.length - 1].focus(); return; }
+  const di = e.target.closest("[data-delitem]");
+  if (di) { const box = document.getElementById("itemsBox"); if (box.children.length > 1) di.closest(".it").remove(); else di.closest(".it").querySelectorAll("input").forEach(x => x.value = ""); }
+});
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && !modal.hidden) closeForm();
   if ((e.key === "Enter" || e.key === " ") && e.target.dataset && e.target.dataset.edit && modal.hidden) { e.preventDefault(); openForm(e.target.dataset.edit, e.target.dataset.id); }
@@ -578,6 +710,12 @@ document.addEventListener("keydown", e => {
 app.addEventListener("click", async e => {
   if (e.target.closest("#pushOn")) { enablePush(); return; }
   if (e.target.closest("#invAdd")) { addInvite(); return; }
+  const cb = e.target.closest("[data-cal]");
+  if (cb) { const k = Number(cb.dataset.cal); state.calMonth = k ? monthAdd(state.calMonth || today().slice(0, 7), k) : today().slice(0, 7); if (!k) state.calDay = today(); render(); return; }
+  const dd = e.target.closest("[data-day]");
+  if (dd) { state.calDay = dd.dataset.day; state.calMonth = dd.dataset.day.slice(0, 7); render(); return; }
+  const nd = e.target.closest("[data-newdel]");
+  if (nd) { openDelivery(nd.dataset.newdel); return; }
   const ui = e.target.closest("[data-uninvite]");
   if (ui) { if (!ui.classList.contains("armed")) { ui.classList.add("armed"); ui.textContent = "Tap again to remove"; return; } try { await deleteDoc(doc(db, "invites", ui.dataset.uninvite)); } catch (err) { setMsg(errText(err), true); } return; }
   const t = e.target.closest("[data-add],[data-edit],[data-stage],[data-who],[data-done],[data-toggle]"); if (!t) return;
