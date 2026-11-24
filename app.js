@@ -19,7 +19,7 @@ const auth = getAuth(fb);
 const db = getFirestore(fb);
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({ prompt: "select_account" });
-const VAPID_KEY = ""; // Web Push public key from Firebase > Project settings > Cloud Messaging
+const VAPID_KEY = "BJmHqvGb0sSEH8r15gC9MaIt63dY6ZJqw-l4tmIbDfwgYB63v6Z4qrWUPoByCXVU77A_0-WCsTTRJVrUN5RbP9Y"; // Web Push public key from Firebase > Project settings > Cloud Messaging
 
 // ---------- constants ----------
 const STAGES = ["New lead", "Quotation sent", "Advance paid", "Delivery scheduled", "Delivered", "Lost"];
