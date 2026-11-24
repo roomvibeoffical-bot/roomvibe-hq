@@ -1,7 +1,8 @@
 // RoomVibe HQ — team app (Firebase). Security is enforced by firestore.rules; this file only decides what to show.
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, onSnapshot, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getMessaging, getToken, isSupported } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC6QC6z2H7vzVdapDNGTX_FSGqv8hixI4w",
@@ -18,6 +19,7 @@ const auth = getAuth(fb);
 const db = getFirestore(fb);
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({ prompt: "select_account" });
+const VAPID_KEY = ""; // Web Push public key from Firebase > Project settings > Cloud Messaging
 
 // ---------- constants ----------
 const STAGES = ["New lead", "Quotation sent", "Advance paid", "Delivery scheduled", "Delivered", "Lost"];
@@ -51,6 +53,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const code = s => String(s || "Unknown").split(" ·")[0];
 const fmtDate = s => { if (!s) return ""; const d = new Date(s + "T00:00:00"); return isNaN(d) ? esc(s) : d.toLocaleDateString("en-GB", { day: "numeric", month: "short" }); };
 const fmtLong = s => { const d = new Date(s + "T00:00:00"); return isNaN(d) ? s : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }); };
+const fmtTime = s => { const m = /^(\d{1,2}):(\d{2})/.exec(s || ""); if (!m) return s || ""; let h = +m[1]; const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return h + ":" + m[2] + " " + ap; };
 const safeUrl = u => (typeof u === "string" && u.startsWith("https://")) ? u : "icon-192.png";
 const inR = (s, a, b) => typeof s === "string" && s >= a && s <= b;
 function presetRange(p) {
@@ -289,7 +292,7 @@ function vDeals() {
 // ---------- tasks ----------
 function taskRow(x) {
   const t = today(), late = x.status !== "Done" && x.due && x.due < t;
-  return `<div class="task"><input type="checkbox" data-done="${esc(x.id)}" ${x.status === "Done" ? "checked" : ""} aria-label="Mark done"><div class="body" data-edit="tasks" data-id="${esc(x.id)}" tabindex="0"><div class="t" style="${x.status === "Done" ? "text-decoration:line-through;opacity:.6" : ""}">${esc(x.title)}</div><div class="m"><span class="pill">${esc(x.type || "Other")}</span> ${esc(userName(x.assigneeUid) || "Unassigned")} · <span style="${late ? "color:var(--bad);font-weight:600" : ""}">${x.due ? (late ? "Overdue · " : "") + fmtDate(x.due) : "No date"}</span>${x.customer ? " · " + esc(x.customer) + (x.area ? ", " + esc(x.area) : "") + (x.phone ? " · " + esc(x.phone) : "") : ""}</div></div></div>`;
+  return `<div class="task"><input type="checkbox" data-done="${esc(x.id)}" ${x.status === "Done" ? "checked" : ""} aria-label="Mark done"><div class="body" data-edit="tasks" data-id="${esc(x.id)}" tabindex="0"><div class="t" style="${x.status === "Done" ? "text-decoration:line-through;opacity:.6" : ""}">${esc(x.title)}</div><div class="m"><span class="pill">${esc(x.type || "Other")}</span> ${esc(userName(x.assigneeUid) || "Unassigned")} · <span style="${late ? "color:var(--bad);font-weight:600" : ""}">${x.due ? (late ? "Overdue · " : "") + fmtDate(x.due) + (x.time ? " · " + esc(fmtTime(x.time)) : "") : "No date"}</span>${x.customer ? " · " + esc(x.customer) + (x.area ? ", " + esc(x.area) : "") + (x.phone ? " · " + esc(x.phone) : "") : ""}</div></div></div>`;
 }
 function vTasks() {
   const full = fullTasks();
@@ -301,7 +304,7 @@ function vTasks() {
   const t = today(), g = { Overdue: open.filter(x => x.due && x.due < t), Today: open.filter(x => x.due === t), Upcoming: open.filter(x => !x.due || x.due > t) };
   return `<div class="row spread"><h2>${is("owner", "admin", "manager") ? "Tasks &amp; Deliveries" : "My Work"}</h2>${full ? addBtn("tasks", "New task") : ""}</div>
   ${who.length > 1 ? `<div class="chips">${who.map(([k, l]) => `<button class="chip" data-who="${esc(k)}" aria-pressed="${state.taskWho === k}">${esc(l)}</button>`).join("")}</div>` : `<div style="height:14px"></div>`}
-  <div class="grid2">${Object.entries(g).map(([k, v]) => `<div class="panel"><h3>${k} · ${v.length}</h3>${v.length ? v.map(taskRow).join("") : `<div class="empty">${k === "Overdue" ? "Nothing overdue." : "Nothing here."}</div>`}</div>`).join("")}
+  ${pushBanner()}<div class="grid2">${Object.entries(g).map(([k, v]) => `<div class="panel"><h3>${k} · ${v.length}</h3>${v.length ? v.map(taskRow).join("") : `<div class="empty">${k === "Overdue" ? "Nothing overdue." : "Nothing here."}</div>`}</div>`).join("")}
   <div class="panel"><h3>Done recently</h3>${done.length ? done.slice(0, 15).map(taskRow).join("") : `<div class="empty">Completed tasks show here.</div>`}</div></div>`;
 }
 
@@ -380,14 +383,19 @@ const SCHEMAS = {
     { k: "closeDate", l: "Order confirmed on", t: "date", hint: "Fills itself when stage moves to Advance paid" },
     { k: "deliveryDate", l: "Delivery date", t: "date" },
     { k: "notes", l: "Notes", t: "area" }] },
-  tasks: { label: "task", fields: [
+  tasks: { label: "visit / task", fields: [
     { k: "title", l: "What needs doing", t: "text", req: 1, wide: 1 },
-    { k: "type", l: "Type", t: "select", opts: TASK_TYPES, def: "Delivery" },
+    { k: "type", l: "Type", t: "select", opts: TASK_TYPES, def: "Site visit" },
     { k: "assigneeUid", l: "Assigned to", t: "user" },
-    { k: "due", l: "Due date", t: "date", def: today },
-    { k: "dealId", l: "Customer (fills address & phone)", t: "deal" },
+    { k: "due", l: "Date", t: "date", def: today },
+    { k: "time", l: "Time", t: "time" },
+    { k: "dealId", l: "Pick existing customer (optional)", t: "deal", hint: "Fills name, phone and area below when they are empty" },
+    { k: "customer", l: "Customer name", t: "text" },
+    { k: "phone", l: "Customer phone", t: "tel" },
+    { k: "area", l: "Area / building / unit", t: "text" },
+    { k: "location", l: "Google Maps link or full address", t: "text", wide: 1 },
+    { k: "notes", l: "Details / what to do", t: "area" },
     { k: "status", l: "Status", t: "select", opts: ["Open", "Done"], def: "Open" },
-    { k: "notes", l: "Instructions / address", t: "area" },
     { k: "report", l: "Report from site", t: "area" }] },
   suppliers: { label: "supplier", fields: [
     { k: "name", l: "Supplier name", t: "text", req: 1 },
@@ -417,6 +425,44 @@ function fieldHtml(f, val, disabled) {
   else inp = `<input id="${fid}" type="${f.t === "num" ? "number" : f.t}" ${f.t === "num" ? 'inputmode="decimal" min="0" step="any"' : ""} value="${esc(val)}" ${f.list ? `list="dl_${f.k}"` : ""} ${dis}>${f.list ? `<datalist id="dl_${f.k}">${f.list.map(o => `<option value="${esc(o)}">`).join("")}</datalist>` : ""}`;
   return `<div class="f ${f.wide || f.t === "area" ? "wide" : ""}"><label for="${fid}">${esc(f.l)}${f.req ? " *" : ""}</label>${inp}${f.hint ? `<span class="muted" style="font-size:11.5px">${esc(f.hint)}</span>` : ""}</div>`;
 }
+function mapUrl(t) {
+  const l = String(t.location || "").trim();
+  if (l.startsWith("https://")) return l;
+  const q = l || t.area || "";
+  return q ? "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q + (l ? "" : ", UAE")) : "";
+}
+function waNum(tel) { let n = tel.replace(/^\+/, ""); if (/^0\d{9}$/.test(n)) n = "971" + n.slice(1); return n; }
+function taskDetail(t) {
+  const tel = String(t.phone || "").replace(/[^\d+]/g, ""), map = mapUrl(t), a = 'style="text-decoration:none"';
+  const line = (k, v) => v ? `<div><span class="muted">${k}:</span> ${esc(v)}</div>` : "";
+  return `<div class="detail"><div class="row spread"><strong>${esc(t.type || "Task")} · ${t.due ? esc(fmtLong(t.due)) : "No date"}${t.time ? " · " + esc(fmtTime(t.time)) : ""}</strong><span class="pill">${esc(userName(t.assigneeUid) || "Unassigned")}</span></div>
+  ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}
+  <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
+}
+let pushState = "";
+function pushIsOn() { let t = ""; try { t = localStorage.getItem("rvhq-push") || ""; } catch (e) {} return pushState === "on" || (window.Notification && Notification.permission === "granted" && t && me && (me.fcmTokens || []).includes(t)); }
+function pushBanner() {
+  if (!VAPID_KEY || pushIsOn()) return "";
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent), standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  if (ios && !standalone) return `<div class="note">iPhone: open this app in Safari, tap Share → Add to Home Screen, open it from the home screen, then turn on notifications here.</div>`;
+  if (pushState === "unsupported" || !("Notification" in window)) return `<div class="note">This browser can't show notifications. Use Chrome on Android, or the installed app on iPhone.</div>`;
+  if (pushState === "denied" || Notification.permission === "denied") return `<div class="note bad">Notifications are blocked for this app. Allow them in your phone or browser settings for this site, then reload.</div>`;
+  return `<div class="note row spread"><span>Get a phone alert when a visit or delivery is given to you.</span><button class="btn primary" id="pushOn" ${pushState === "working" ? "disabled" : ""}>${pushState === "working" ? "Turning on…" : "Turn on notifications"}</button></div>`;
+}
+async function enablePush() {
+  pushState = "working"; render();
+  try {
+    if (!("Notification" in window) || !(await isSupported())) { pushState = "unsupported"; render(); return; }
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { pushState = "denied"; render(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const token = await getToken(getMessaging(fb), { vapidKey: VAPID_KEY, serviceWorkerRegistration: reg });
+    if (!token) throw new Error("no token");
+    await updateDoc(doc(db, "users", user.uid), { fcmTokens: arrayUnion(token) });
+    try { localStorage.setItem("rvhq-push", token); } catch (e) {}
+    pushState = "on"; setMsg("Notifications are on for this device.");
+  } catch (e) { pushState = "error"; setMsg("Couldn't turn on notifications (" + (e.code || e.message || "error") + "). Try again.", true); }
+}
 function openForm(kind, id) {
   const sc = SCHEMAS[kind]; if (!sc) return;
   const src = kind === "deals" ? data.deals : data[kind];
@@ -436,7 +482,7 @@ function openForm(kind, id) {
   fields.forEach(f => { let v = rec ? (f.money ? (data.money[rec.id] || {})[f.k] : rec[f.k]) : (typeof f.def === "function" ? f.def() : f.def); values[f.k] = v == null ? "" : v; });
   const lim = new Set(["status", "report"]);
   const body = fields.map(f => fieldHtml(f, values[f.k], !(editable || (limited && lim.has(f.k))) || f.fixed)).join("");
-  const detail = kind === "tasks" && rec && rec.customer ? `<div class="detail"><strong>${esc(rec.customer)}</strong>${rec.phone ? `<span>Phone: ${esc(rec.phone)}</span>` : ""}${rec.area ? `<span>Area: ${esc(rec.area)}</span>` : ""}</div>` : "";
+  const detail = kind === "tasks" && rec ? taskDetail(rec) : "";
   const canSave = editable || limited;
   modal.innerHTML = `<div class="scrim" data-close="1"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mt"><div class="row spread"><h2 id="mt">${rec ? (canSave ? "Edit" : "View") : "New"} ${esc(sc.label)}</h2><button class="btn" data-close="1" aria-label="Close">✕</button></div>
   ${detail}<form id="frm" class="form">${body}</form><div class="err" id="ferr"></div>
@@ -490,8 +536,10 @@ async function saveRecord(kind, rec, vals, limited) {
   }
   if (kind === "tasks") {
     const d = vals.dealId && byId(data.deals, vals.dealId);
-    Object.assign(vals, { customer: d ? d.customer || "" : "", phone: d ? d.phone || "" : "", area: d ? d.area || "" : "" });
+    if (d) { if (!vals.customer) vals.customer = d.customer || ""; if (!vals.phone) vals.phone = d.phone || ""; if (!vals.area) vals.area = d.area || ""; }
     vals.doneAt = vals.status === "Done" ? (base.doneAt || nowISO()) : "";
+    const changed = !rec || ["due", "time", "assigneeUid", "location", "area", "customer"].some(k => String(rec[k] || "") !== String(vals[k] || ""));
+    if (changed && vals.status !== "Done") Object.assign(vals, { notified: false, remindEve: false, remindDay: false });
   }
   await setDoc(doc(db, kind, id), Object.assign(base, vals, stamp));
 }
@@ -504,6 +552,7 @@ document.addEventListener("keydown", e => {
 
 // ---------- events ----------
 app.addEventListener("click", async e => {
+  if (e.target.closest("#pushOn")) { enablePush(); return; }
   const t = e.target.closest("[data-add],[data-edit],[data-stage],[data-who],[data-done],[data-toggle]"); if (!t) return;
   if (t.dataset.done !== undefined) {
     const x = byId(data.tasks, t.dataset.done); if (!x) return; t.disabled = true;
