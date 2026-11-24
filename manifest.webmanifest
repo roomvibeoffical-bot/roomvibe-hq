@@ -1,0 +1,14 @@
+{
+  "name": "RoomVibe HQ",
+  "short_name": "RoomVibe HQ",
+  "description": "RoomVibe team app: customers, deals, deliveries, suppliers and dashboard.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0F311E",
+  "theme_color": "#0F311E",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
