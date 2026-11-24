@@ -27,7 +27,7 @@ service cloud.firestore {
         && ((request.resource.data.role == 'pending' && request.resource.data.active == false)
             || (bootOwnerEmail() && request.resource.data.role == 'owner' && request.resource.data.active == true));
       allow update: if signedIn() && (
-          (userId == uid() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photo', 'lastSeen']))
+          (userId == uid() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photo', 'lastSeen', 'fcmTokens']))
           || (isOwner() && userId != uid())
           || (isAdmin() && resource.data.role != 'owner' && request.resource.data.role != 'owner' && userId != uid())
         );
