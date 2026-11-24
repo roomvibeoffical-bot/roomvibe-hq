@@ -217,7 +217,7 @@ function chart(a, b) {
     while (iso(d).slice(0, 7) <= end) { const s = iso(d), e = iso(new Date(d.getFullYear(), d.getMonth() + 1, 0)); buckets.push({ a: s < a ? a : s, b: e > b ? b : e, lab: d.toLocaleDateString("en-GB", { month: "short" }) }); d = new Date(d.getFullYear(), d.getMonth() + 1, 1); }
   }
   const rows = buckets.map(x => { const r = nums(x.a, x.b); return Object.assign(x, { s: r.sales, c: r.costs }); });
-  const max = Math.max(1, ...rows.map(r => Math.max(r.s, r.c)));
+  const max = Math.max(1000, ...rows.map(r => Math.max(r.s, r.c)));
   const W = 700, H = 220, L = 40, bw = (W - L - 8) / rows.length, every = Math.ceil(rows.length / 12);
   let svg = `<svg class="bars" viewBox="0 0 ${W} ${H + 26}" role="img" aria-label="Sales and costs by ${daily ? "day" : "month"}">`;
   [0, .5, 1].forEach(f => { const y = H - (H - 14) * f; svg += `<line x1="${L}" x2="${W - 4}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${L - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${f ? (max * f >= 1000 ? Math.round(max * f / 1000) + "k" : Math.round(max * f)) : "0"}</text>`; });
