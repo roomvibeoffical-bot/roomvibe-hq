@@ -43,3 +43,36 @@ for (const d of snap.docs) {
   if (Object.keys(upd).length) await d.ref.update(upd);
 }
 console.log(`Dubai ${today} ${hour}:00 — checked ${snap.size} open tasks, sent ${sent} notifications.`);
+
+// ---------- invitation emails (sent once per invited Gmail) ----------
+const GU = process.env.GMAIL_USER, GP = process.env.GMAIL_APP_PASSWORD;
+const APP_URL = "https://roomvibeoffical-bot.github.io/roomvibe-hq/";
+if (GU && GP) {
+  const nodemailer = (await import("nodemailer")).default;
+  const mail = nodemailer.createTransport({ service: "gmail", auth: { user: GU, pass: GP.replace(/\s+/g, "") } });
+  const inv = await db.collection("invites").get();
+  let sentInv = 0;
+  for (const d of inv.docs) {
+    const v = d.data();
+    if (v.emailSent === true || v.emailSent === "error") continue;
+    const role = String(v.role || "team member"), label = role.charAt(0).toUpperCase() + role.slice(1);
+    const text = `Assalam o Alaikum,\n\nYou have been given access to RoomVibe HQ (RoomVibe team app) as ${label}.\n\n1) Open this link in Chrome (iPhone: Safari): ${APP_URL}\n2) Tap "Sign in with Google" and choose this Gmail: ${d.id}\n3) Android: Chrome menu (3 dots) > "Install and create shortcut" > Install.\n   iPhone: Share > "Add to Home Screen", then open the app from the home screen.\n4) In the app tap "Turn on notifications" and Allow, so you get your visits and deliveries.\n\nAfter this, open the app from the RV icon on your phone.\n\nRoomVibe`;
+    const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#16211B">
+<div style="background:#0F311E;color:#fff;padding:22px 24px;border-radius:12px 12px 0 0"><div style="font-family:Georgia,serif;font-size:26px">RoomVibe HQ</div><div style="opacity:.8;font-size:13px">RoomVibe team app</div></div>
+<div style="border:1px solid #DCE2DC;border-top:0;padding:24px;border-radius:0 0 12px 12px">
+<p>Assalam o Alaikum,</p><p>You have been given access to <b>RoomVibe HQ</b> as <b>${label}</b>.</p>
+<p style="text-align:center;margin:26px 0"><a href="${APP_URL}" style="background:#0F311E;color:#fff;text-decoration:none;padding:14px 26px;border-radius:8px;font-weight:bold;display:inline-block">Open RoomVibe HQ</a></p>
+<ol style="padding-left:18px;line-height:1.6"><li>Open the button above in <b>Chrome</b> (iPhone: <b>Safari</b>).</li><li>Tap <b>Sign in with Google</b> and choose <b>${d.id}</b>.</li><li><b>Android:</b> Chrome menu (3 dots) &gt; <b>Install and create shortcut</b> &gt; Install.<br><b>iPhone:</b> Share &gt; <b>Add to Home Screen</b>, then open it from the home screen.</li><li>In the app tap <b>Turn on notifications</b> and <b>Allow</b>.</li></ol>
+<p style="color:#5D6A62;font-size:13px">After this, just open the app from the RV icon on your phone.</p></div></div>`;
+    try {
+      await mail.sendMail({ from: `RoomVibe HQ <${GU}>`, to: d.id, subject: "You're invited to RoomVibe HQ", text, html });
+      await d.ref.update({ emailSent: true, emailSentAt: new Date().toISOString() }); sentInv++;
+    } catch (e) {
+      console.log("Invitation email failed:", e.message);
+      await d.ref.update({ emailSent: "error", emailError: String(e.message).slice(0, 200) });
+    }
+  }
+  console.log(`Invitation emails sent: ${sentInv}`);
+} else {
+  console.log("GMAIL_USER / GMAIL_APP_PASSWORD secrets not set; invitation emails skipped.");
+}
