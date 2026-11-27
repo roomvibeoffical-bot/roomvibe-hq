@@ -18,7 +18,7 @@ service cloud.firestore {
     function isAdmin() { return isAny(['owner', 'admin']); }
     function inviteDoc() { return /databases/$(database)/documents/invites/$(request.auth.token.email); }
     function invited() { return exists(inviteDoc()); }
-    function isStaff() { return isAny(['owner', 'admin', 'manager', 'sales', 'supervisor', 'marketing']); }
+    function isStaff() { return isAny(['owner', 'admin', 'manager', 'sales', 'supervisor', 'specialist', 'marketing']); }
 
     // ---------- team members ----------
     match /users/{userId} {
@@ -60,10 +60,10 @@ service cloud.firestore {
     // ---------- tasks / deliveries / visits ----------
     match /tasks/{id} {
       allow read: if isAny(['owner', 'admin', 'manager', 'sales'])
-        || (isAny(['supervisor', 'marketing']) && resource.data.assigneeUid == uid());
+        || (isAny(['supervisor', 'specialist', 'marketing']) && resource.data.assigneeUid == uid());
       allow create: if isAny(['owner', 'admin', 'manager', 'sales']);
       allow update: if isAny(['owner', 'admin', 'manager', 'sales'])
-        || (isAny(['supervisor', 'marketing']) && resource.data.assigneeUid == uid()
+        || (isAny(['supervisor', 'specialist', 'marketing']) && resource.data.assigneeUid == uid()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'doneAt', 'report', 'updatedAt', 'updatedBy']));
       allow delete: if isAny(['owner', 'admin', 'manager']);
     }

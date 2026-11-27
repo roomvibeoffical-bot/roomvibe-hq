@@ -1,6 +1,7 @@
 // RoomVibe HQ – Sales webhook (Google Apps Script web app).
 // Owner: roomvibeoffical@gmail.com (the Firebase project owner). Deploy: Web app, Execute as: Me, Who has access: Anyone.
 // The sales agent POSTs one JSON message per sale / payment / update and gets "Saved" or the exact error back at once.
+// Actions: NEW SALE, PAYMENT, UPDATE (deals) · APPOINTMENT, APPOINTMENT UPDATE, APPOINTMENT CANCEL (specialist visits) · DELETE TEST.
 // Every call is also written to the "HQ Sales Log (webhook)" sheet as a backup.
 
 // The secret key lives in Project Settings > Script properties > KEY (never in this file, the repo is public).
@@ -41,6 +42,8 @@ function setup() {
 
 // ---------- main ----------
 function handle(b) {
+  const act = up(b.action).replace(/[_-]/g, ' ');
+  if (act.indexOf('APPOINTMENT') === 0) return appointment(b, act);
   const f = read(b);
   const now = new Date(), today = day(now), tomorrow = day(new Date(now.getTime() + 864e5)), hour = Number(Utilities.formatDate(now, TZ, 'H'));
   const users = listUsers();
@@ -149,6 +152,79 @@ function addDelivery(dealId, x, supervisor, today, tomorrow, hour) {
   const id = fs('post', '/tasks', { fields: encFields(task) }).name.split('/').pop();
   if (supervisor) pushTo([supervisor], 'New delivery: ' + title.replace(/^Delivery: /, ''), [x.deliveryDate, x.time, x.area].filter(Boolean).join(' · '), './#tasks', id);
   return id;
+}
+
+// ---------- appointments (specialist visits: measurement, curtains, fabric samples) ----------
+const APPT_TYPES = ['Measurement', 'Curtains', 'Fabric samples', 'Other'];
+function appointment(b, act) {
+  if (['APPOINTMENT', 'APPOINTMENT UPDATE', 'APPOINTMENT CANCEL'].indexOf(act) < 0) throw new Error('action must be APPOINTMENT, APPOINTMENT UPDATE or APPOINTMENT CANCEL.');
+  const now = new Date(), today = day(now), tomorrow = day(new Date(now.getTime() + 864e5)), hour = Number(Utilities.formatDate(now, TZ, 'H'));
+  const id = str(b.appointmentId);
+  if (id && !/^[A-Za-z0-9]+$/.test(id)) throw new Error('appointmentId is not valid.');
+  if (act !== 'APPOINTMENT' && !id) throw new Error('appointmentId is required to update or cancel (it was in the reply when the appointment was made).');
+  const users = listUsers(), specs = users.filter(u => u.active && u.role === 'specialist');
+  let spec = null;
+  if (str(b.specialist)) {
+    const q = low(b.specialist);
+    spec = specs.find(u => low(u.email) === q) || specs.find(u => low(u.name) === q) || specs.find(u => low(u.name).indexOf(q) >= 0) || null;
+    if (!spec) throw new Error('Specialist "' + str(b.specialist) + '" is not an active Specialist in the app. Leave it empty, or give him the Specialist role in Team & Access.');
+  }
+  let type = '';
+  if (str(b.type)) { type = APPT_TYPES.find(t => low(t) === low(b.type)) || ''; if (!type) throw new Error('type must be one of: ' + APPT_TYPES.join(', ') + '.'); }
+  const a = { customer: str(b.customer), phone: phone(b.phone), address: str(b.address), area: str(b.area), location: str(b.mapsLink || b.location), due: str(b.date), time: str(b.time), notes: str(b.notes), quoteNo: up(b.quoteNo) };
+  if (a.due && !isDate(a.due)) throw new Error('date must be YYYY-MM-DD.');
+  if (a.time && !/^\d{1,2}:\d{2}$/.test(a.time)) throw new Error('time must be HH:MM (24h), or leave it empty.');
+  if (a.location && !/^https:\/\//.test(a.location)) { a.address = a.address || a.location; a.location = ''; }
+  let dealId = '';
+  if (a.quoteNo) { const d = findOne('deals', [eq('quoteNo', a.quoteNo)]); dealId = d ? d.id : ''; }
+  const label = u => u ? (u.name || u.email) : 'no specialist yet';
+  const when = (dd, tt) => [dd, tt].filter(Boolean).join(' ');
+
+  if (!id) {   // ---- new appointment ----
+    if (!a.customer) throw new Error('customer is required for an APPOINTMENT.');
+    if (!a.due) throw new Error('date is required for an APPOINTMENT (YYYY-MM-DD).');
+    if (!spec) spec = specs[0] || null;
+    type = type || 'Measurement';
+    const task = {
+      title: (type + ': ' + a.customer).slice(0, 120), type: type, assigneeUid: spec ? spec.uid : '', due: a.due, time: a.time, dealId: dealId, quoteNo: a.quoteNo,
+      customer: a.customer, phone: a.phone, address: a.address, area: a.area, location: a.location, items: [], quoteUrl: '', notes: a.notes,
+      status: 'Open', report: '', doneAt: '', notified: !!spec, remindEve: a.due === tomorrow && hour >= 18, remindDay: a.due === today && hour >= 8,
+      createdAt: iso(), createdBy: AGENT, updatedAt: iso(), updatedBy: AGENT
+    };
+    const newId = fs('post', '/tasks', { fields: encFields(task) }).name.split('/').pop();
+    if (spec) pushTo([spec], 'New appointment: ' + type + ' · ' + a.customer, [when(a.due, a.time), a.area || a.address].filter(Boolean).join(' · '), './#visits', newId);
+    return { ok: true, action: 'APPOINTMENT', appointmentId: newId, quoteNo: a.quoteNo, specialist: label(spec), message: 'Appointment saved: ' + type + ' · ' + a.customer + ' · ' + when(a.due, a.time) + ' (' + label(spec) + '). appointmentId ' + newId + '.' };
+  }
+
+  // ---- existing appointment: update or cancel ----
+  let cur;
+  try { cur = decFields(fs('get', '/tasks/' + id).fields || {}); } catch (err) { throw new Error('No appointment with appointmentId ' + id + '.'); }
+  if (cur.type === 'Delivery') throw new Error('appointmentId ' + id + ' is a delivery, not an appointment. Use UPDATE with the Quote No for deliveries.');
+  const owner = users.find(u => u.uid === cur.assigneeUid) || null;
+  if (act === 'APPOINTMENT CANCEL') {
+    const upd = { status: 'Cancelled', notes: [cur.notes, 'Cancelled (' + today + ')' + (a.notes ? ': ' + a.notes : '')].filter(Boolean).join('\n'), updatedAt: iso(), updatedBy: AGENT };
+    fs('patch', '/tasks/' + id + '?' + mask(Object.keys(upd)), { fields: encFields(upd) });
+    if (owner) pushTo([owner], 'Appointment cancelled: ' + (cur.customer || ''), when(cur.due, cur.time), './#visits', id);
+    return { ok: true, action: 'APPOINTMENT CANCEL', appointmentId: id, message: 'Appointment cancelled: ' + (cur.customer || '') + ' · ' + when(cur.due, cur.time) + '.' };
+  }
+  const upd = { updatedAt: iso(), updatedBy: AGENT };
+  ['customer', 'phone', 'address', 'area', 'location', 'due', 'time', 'quoteNo'].forEach(k => { if (a[k]) upd[k] = a[k]; });
+  if (a.notes) upd.notes = a.notes;
+  if (type) upd.type = type;
+  if (a.quoteNo) upd.dealId = dealId;
+  if (spec) upd.assigneeUid = spec.uid;
+  if (upd.type || upd.customer) upd.title = ((upd.type || cur.type) + ': ' + (upd.customer || cur.customer)).slice(0, 120);
+  if (cur.status === 'Cancelled' && str(b.reopen).toLowerCase() === 'true') upd.status = 'Open';
+  const target = spec || owner;
+  const changed = ['due', 'time', 'address', 'area', 'location', 'assigneeUid'].some(k => upd[k] !== undefined && upd[k] !== cur[k]);
+  if (changed && target) {
+    const due = upd.due || cur.due;
+    Object.assign(upd, { notified: true, remindEve: due === tomorrow && hour >= 18, remindDay: due === today && hour >= 8 });
+  }
+  fs('patch', '/tasks/' + id + '?' + mask(Object.keys(upd)), { fields: encFields(upd) });
+  const m = Object.assign({}, cur, upd);
+  if (changed && target) pushTo([target], 'Appointment changed: ' + (m.customer || ''), [when(m.due, m.time), m.area || m.address].filter(Boolean).join(' · '), './#visits', id);
+  return { ok: true, action: 'APPOINTMENT UPDATE', appointmentId: id, specialist: label(spec || owner), message: 'Appointment updated: ' + (m.type || '') + ' · ' + (m.customer || '') + ' · ' + when(m.due, m.time) + ' (' + label(spec || owner) + ').' };
 }
 
 // ---------- input ----------
@@ -297,8 +373,8 @@ function log(b, res) {
   const sh = logSheet();
   const itemsText = Array.isArray(b.items) ? b.items.map(i => (i.qty || 1) + ' x ' + i.name + (i.note ? ' — ' + i.note : '')).join('\n') : str(b.items);
   const row = [Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm'), res.ok ? 'SAVED' : 'ERROR', str(b.action), up(b.quoteNo), str(b.customer), phone(b.phone), str(b.area), str(b.location || b.mapsLink),
-    str(b.package), itemsText, str(b.total), str(b.paid), str(b.method), str(b.orderDate), str(b.deliveryDate), str(b.deliveryTime || b.time), str(b.refCode || b.source),
-    str(b.salesEmail || b.seller), res.quoteUrl || str(b.quoteUrl), str(b.notes), res.dealId || '', res.ok ? res.message : res.error].map(String);
+    str(b.package), itemsText, str(b.total), str(b.paid), str(b.method), str(b.orderDate), str(b.deliveryDate || b.date), str(b.deliveryTime || b.time), str(b.refCode || b.source),
+    str(b.salesEmail || b.seller), res.quoteUrl || str(b.quoteUrl), str(b.notes), res.dealId || res.appointmentId || '', res.ok ? res.message : res.error].map(String);
   const r = sh.getLastRow() + 1;
   sh.getRange(r, 1, 1, row.length).setNumberFormat('@').setValues([row]);
 }

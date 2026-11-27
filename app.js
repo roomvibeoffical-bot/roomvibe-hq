@@ -26,16 +26,18 @@ const STAGES = ["New lead", "Quotation sent", "Advance paid", "Delivery schedule
 const WON = new Set(["Advance paid", "Delivery scheduled", "Delivered"]);
 const SOURCES = ["G1 · Google Ads (website)", "G2 · Google organic", "G3 · Google ad WhatsApp", "M1 · Meta ad", "S1 · FB/IG visit", "A1 · AI / ChatGPT", "W1 · Direct / other", "Unknown"];
 const PACKAGES = ["Modry", "Vibe", "Marble", "Halo", "Mini Studio", "Individual items", "Custom"];
-const TASK_TYPES = ["Delivery", "Site visit", "Follow-up", "Supplier pickup", "Other"];
+const TASK_TYPES = ["Delivery", "Measurement", "Curtains", "Fabric samples", "Site visit", "Follow-up", "Supplier pickup", "Other"];
+const APPT_TYPES = new Set(["Measurement", "Curtains", "Fabric samples", "Site visit"]);
 const EXP_CATS = ["Google Ads", "Meta Ads", "Salaries", "Delivery & transport", "Rent & office", "Other"];
 const PAY_METHODS = ["Bank transfer", "Cash", "Card", "Cheque"];
-const ROLE_LABEL = { owner: "Owner", admin: "Admin", manager: "Manager", sales: "Sales", supervisor: "Supervisor", marketing: "Marketing", pending: "Waiting for access" };
+const ROLE_LABEL = { owner: "Owner", admin: "Admin", manager: "Manager", sales: "Sales", supervisor: "Supervisor", specialist: "Specialist", marketing: "Marketing", pending: "Waiting for access" };
 const ROLE_HELP = {
   owner: "Everything, including money and giving access",
   admin: "Everything, including money and giving access (cannot change owners)",
   manager: "All customers, deals and tasks. No profit, suppliers or expenses",
   sales: "Customers & deals, own deal values, team tasks",
   supervisor: "Only their own deliveries and site visits",
+  specialist: "Only their own measurement / curtain / fabric appointments (no prices)",
   marketing: "Leads and sources (no money), own tasks"
 };
 const PRESETS = [["today", "Today"], ["yesterday", "Yesterday"], ["d3", "Last 3 days"], ["d5", "Last 5 days"], ["d7", "Last 7 days"], ["d30", "Last 1 month (30 days)"], ["thism", "This month"], ["lastm", "Last month"], ["d60", "Last 2 months"], ["d90", "Last 3 months"], ["d180", "Last 6 months"], ["thisy", "This year"], ["d365", "Last 12 months"], ["custom", "Custom dates…"]];
@@ -159,6 +161,7 @@ function tabs() {
   if (is("sales")) return [["tasks", "My Work"], ["calendar", "Calendar"], ["deals", "Customers & Deals"]];
   if (is("marketing")) return [["deals", "Leads"], ["tasks", "My Work"]];
   if (is("supervisor")) return [["tasks", "My Work"], ["calendar", "Calendar"]];
+  if (is("specialist")) return [["visits", "My Visits"], ["calendar", "Calendar"]];
   return [];
 }
 window.addEventListener("hashchange", render);
@@ -191,7 +194,7 @@ function render() {
   }
   const keepQ = document.activeElement && document.activeElement.id === "q";
   const hdr = header();
-  const fn = { dashboard: vDash, calendar: vCalendar, deals: vDeals, tasks: vTasks, suppliers: vSuppliers, expenses: vExpenses, team: vTeam }[state.view];
+  const fn = { dashboard: vDash, calendar: vCalendar, deals: vDeals, tasks: vTasks, visits: vVisits, suppliers: vSuppliers, expenses: vExpenses, team: vTeam }[state.view];
   app.innerHTML = hdr + `<main class="wrap">${state.msg ? `<div class="note ${state.msgBad ? "bad" : ""}">${esc(state.msg)}</div>` : ""}<section id="view">${fn ? fn() : ""}</section></main>`;
   document.getElementById("so").onclick = () => signOut(auth);
   if (keepQ) { const q = document.getElementById("q"); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }
@@ -303,13 +306,48 @@ function vTasks() {
   const who = full ? [["all", "Everyone"], ["mine", "My tasks"], ...activeStaff().map(u => [u.id, u.name])] : [["mine", "My tasks"]];
   if (!who.some(w => w[0] === state.taskWho)) state.taskWho = (is("owner", "admin", "manager") ? "all" : "mine");
   const f = x => state.taskWho === "all" ? true : state.taskWho === "mine" ? x.assigneeUid === user.uid : x.assigneeUid === state.taskWho;
-  const open = data.tasks.filter(x => x.status !== "Done" && f(x)).sort((x, y) => (x.due || "9").localeCompare(y.due || "9"));
+  const open = data.tasks.filter(x => x.status !== "Done" && x.status !== "Cancelled" && f(x)).sort((x, y) => (x.due || "9").localeCompare(y.due || "9"));
   const done = data.tasks.filter(x => x.status === "Done" && f(x)).sort((x, y) => (y.doneAt || "").localeCompare(x.doneAt || ""));
   const t = today(), g = { Overdue: open.filter(x => x.due && x.due < t), Today: open.filter(x => x.due === t), Upcoming: open.filter(x => !x.due || x.due > t) };
   return `<div class="row spread"><h2>${is("owner", "admin", "manager") ? "Tasks &amp; Deliveries" : "My Work"}</h2>${full ? addBtn("tasks", "New task") : ""}</div>
   ${who.length > 1 ? `<div class="chips">${who.map(([k, l]) => `<button class="chip" data-who="${esc(k)}" aria-pressed="${state.taskWho === k}">${esc(l)}</button>`).join("")}</div>` : `<div style="height:14px"></div>`}
   ${pushBanner()}<div class="grid2">${Object.entries(g).map(([k, v]) => `<div class="panel"><h3>${k} · ${v.length}</h3>${v.length ? v.map(taskRow).join("") : `<div class="empty">${k === "Overdue" ? "Nothing overdue." : "Nothing here."}</div>`}</div>`).join("")}
   <div class="panel"><h3>Done recently</h3>${done.length ? done.slice(0, 15).map(taskRow).join("") : `<div class="empty">Completed tasks show here.</div>`}</div></div>`;
+}
+
+// ---------- specialist: my visits ----------
+function visitCard(x) {
+  const tel = String(x.phone || "").replace(/[^\d+]/g, ""), map = mapUrl(x), done = x.status === "Done", a = 'style="text-decoration:none"';
+  const where = [x.address, x.area].filter(Boolean).join(", ");
+  return `<div class="panel" style="margin-bottom:10px;${done ? "opacity:.75" : ""}">
+  <div class="row spread"><strong style="font-size:16px">${esc(x.customer || x.title || "Visit")}</strong><span class="pill">${esc(x.type || "Visit")}</span></div>
+  <div style="margin-top:4px;font-weight:600">${x.due ? esc(fmtLong(x.due)) : "No date"}${x.time ? " · " + esc(fmtTime(x.time)) : ""}</div>
+  ${where ? `<div style="margin-top:4px">${esc(where)}</div>` : ""}
+  ${x.notes ? `<div class="muted" style="margin-top:6px;white-space:pre-wrap">${esc(x.notes)}</div>` : ""}
+  ${x.report ? `<div style="margin-top:6px;white-space:pre-wrap"><span class="muted">Result:</span> ${esc(x.report)}</div>` : ""}
+  <div class="row" style="margin-top:10px;flex-wrap:wrap">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call ${esc(x.phone)}</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${map ? `<a class="btn" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}<button class="btn primary" data-visitdone="${esc(x.id)}">${done ? "Edit result" : "Done"}</button></div></div>`;
+}
+function vVisits() {
+  const t = today(), key = x => (x.due || "9999-99-99") + " " + (x.time || "99:99");
+  const mine = data.tasks.filter(x => x.assigneeUid === user.uid && x.status !== "Cancelled");
+  const open = mine.filter(x => x.status !== "Done").sort((p, q) => key(p).localeCompare(key(q)));
+  const g = [["Not closed yet", open.filter(x => x.due && x.due < t)], ["Today", open.filter(x => x.due === t)], ["Upcoming", open.filter(x => !x.due || x.due > t)]];
+  const done = mine.filter(x => x.status === "Done").sort((p, q) => (q.doneAt || "").localeCompare(p.doneAt || "")).slice(0, 10);
+  return `<div class="row spread"><h2>My Visits</h2></div>${pushBanner()}
+  ${g.map(([k, v]) => (k === "Not closed yet" && !v.length) ? "" : `<h3 style="margin:16px 0 8px">${k} · ${v.length}</h3>${v.length ? v.map(visitCard).join("") : `<div class="empty">${k === "Today" ? "No visits today." : "Nothing booked yet."}</div>`}`).join("")}
+  ${done.length ? `<h3 style="margin:16px 0 8px">Done recently</h3>${done.map(visitCard).join("")}` : ""}`;
+}
+function openVisitDone(id) {
+  const x = byId(data.tasks, id); if (!x) return;
+  modal.innerHTML = `<div class="scrim" data-close="1"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mt"><div class="row spread"><h2 id="mt">Visit result · ${esc(x.customer || "")}</h2><button class="btn" data-close="1" aria-label="Close">✕</button></div>
+  <div class="form"><div class="f wide"><label for="vrep">Measurements, fabric chosen, next step</label><textarea id="vrep" rows="7">${esc(x.report || "")}</textarea></div></div><div class="err" id="ferr"></div>
+  <div class="row spread" style="margin-top:8px"><span></span><div class="row"><button class="btn" data-close="1" type="button">Cancel</button><button class="btn primary" id="vsv" type="button">${x.status === "Done" ? "Save result" : "Mark done"}</button></div></div></div></div>`;
+  modal.hidden = false; document.getElementById("vrep").focus();
+  document.getElementById("vsv").onclick = async () => {
+    const b = document.getElementById("vsv"); b.disabled = true; b.textContent = "Saving…";
+    try { await updateDoc(doc(db, "tasks", x.id), { status: "Done", doneAt: x.doneAt || nowISO(), report: document.getElementById("vrep").value.trim(), updatedAt: nowISO(), updatedBy: user.uid }); closeForm(); setMsg("Visit saved."); }
+    catch (e) { b.disabled = false; b.textContent = "Mark done"; document.getElementById("ferr").textContent = errText(e); }
+  };
 }
 
 // ---------- suppliers & expenses (owner/admin) ----------
@@ -343,7 +381,7 @@ function vExpenses() {
 
 // ---------- team & access (owner/admin) ----------
 function invitePanel() {
-  const roleOpts = R === "owner" ? ["admin", "manager", "sales", "supervisor", "marketing", "owner"] : ["admin", "manager", "sales", "supervisor", "marketing"];
+  const roleOpts = R === "owner" ? ["admin", "manager", "sales", "supervisor", "specialist", "marketing", "owner"] : ["admin", "manager", "sales", "supervisor", "specialist", "marketing"];
   const inv = (data.invites || []).filter(i => !data.users.some(u => String(u.email || "").toLowerCase() === i.id));
   return `<div class="panel" style="margin-top:16px"><h3>Give access by email</h3>
   <div class="row"><input id="invEmail" type="email" placeholder="Their Gmail address" style="flex:1;min-width:200px" aria-label="Gmail address"><select id="invRole" style="width:auto" aria-label="Role">${roleOpts.map(r => `<option value="${r}" ${r === "supervisor" ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select><button class="btn primary" id="invAdd">Give access</button></div>
@@ -366,7 +404,7 @@ async function addInvite() {
 function vTeam() {
   const order = u => u.role === "pending" ? 0 : u.active ? 1 : 2;
   const list = [...data.users].sort((a, b) => order(a) - order(b) || String(a.name).localeCompare(String(b.name)));
-  const roleOpts = R === "owner" ? ["owner", "admin", "manager", "sales", "supervisor", "marketing"] : ["admin", "manager", "sales", "supervisor", "marketing"];
+  const roleOpts = R === "owner" ? ["owner", "admin", "manager", "sales", "supervisor", "specialist", "marketing"] : ["admin", "manager", "sales", "supervisor", "specialist", "marketing"];
   const pending = list.filter(u => u.role === "pending").length;
   const card = u => {
     const self = u.id === user.uid, locked = self || (R === "admin" && u.role === "owner");
@@ -387,7 +425,7 @@ function vTeam() {
     <li>Their name appears here with “Waiting for access”.</li>
     <li>Choose their role. Their app opens by itself.</li>
     <li>On the phone: Chrome menu → <strong>Install app</strong> (iPhone Safari: Share → <strong>Add to Home Screen</strong>).</li></ol></div>
-   <div class="panel"><h3>Roles</h3><ol class="steps">${["owner", "admin", "manager", "sales", "supervisor", "marketing"].map(r => `<li><strong>${ROLE_LABEL[r]}:</strong> ${esc(ROLE_HELP[r])}</li>`).join("")}</ol>
+   <div class="panel"><h3>Roles</h3><ol class="steps">${["owner", "admin", "manager", "sales", "supervisor", "specialist", "marketing"].map(r => `<li><strong>${ROLE_LABEL[r]}:</strong> ${esc(ROLE_HELP[r])}</li>`).join("")}</ol>
     <p class="muted" style="font-size:12.5px;margin-top:10px">Someone leaves? Tap “Turn off access”. Their work stays in the app.</p></div>
   </div>`;
 }
@@ -420,7 +458,7 @@ document.head.appendChild(calCss);
 function monthAdd(ym, k) { const [y, m] = ym.split("-").map(Number); const d = new Date(y, m - 1 + k, 1); return d.getFullYear() + "-" + pad(d.getMonth() + 1); }
 function calEntries(date) {
   const tasks = data.tasks.filter(t => t.due === date);
-  const deals = is("supervisor", "marketing") ? [] : data.deals.filter(d => d.closeDate === date && WON.has(d.stage));
+  const deals = is("supervisor", "marketing", "specialist") ? [] : data.deals.filter(d => d.closeDate === date && WON.has(d.stage));
   return { tasks, deals };
 }
 function vCalendar() {
@@ -432,7 +470,7 @@ function vCalendar() {
   for (let i = 0; i < 42; i++) {
     const d = addDays(start, i);
     if (i % 7 === 0 && i > 0 && d.slice(0, 7) !== ym) break;
-    const e = calEntries(d), del = e.tasks.filter(x => x.type === "Delivery"), oth = e.tasks.filter(x => x.type !== "Delivery");
+    const e = calEntries(d), del = e.tasks.filter(x => x.type === "Delivery"), oth = e.tasks.filter(x => x.type !== "Delivery" && x.status !== "Cancelled");
     const chips = (del.length ? `<span class="chip2 c-del">${del.length} deliver${del.length > 1 ? "ies" : "y"}</span>` : "")
       + (oth.length ? `<span class="chip2 c-vis">${oth.length} visit${oth.length > 1 ? "s" : ""}</span>` : "")
       + (e.deals.length ? `<span class="chip2 c-deal">${e.deals.length} deal${e.deals.length > 1 ? "s" : ""} done</span>` : "");
@@ -441,7 +479,7 @@ function vCalendar() {
   const title = first.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
   return `<div class="cal-head"><button class="btn" data-cal="-1" aria-label="Previous month">‹</button><h2>${esc(title)}</h2><button class="btn" data-cal="1" aria-label="Next month">›</button><button class="btn" data-cal="0">Today</button></div>
   <div class="cal">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(x => `<div class="dow">${x}</div>`).join("")}${cells}</div>
-  <div class="legend2"><span><i style="background:var(--brand)"></i>Delivery</span><span><i style="background:var(--soft);border:1px solid var(--line)"></i>Site visit / task</span>${is("supervisor", "marketing") ? "" : `<span><i style="background:var(--accent)"></i>Deal done</span>`}</div>
+  <div class="legend2"><span><i style="background:var(--brand)"></i>Delivery</span><span><i style="background:var(--soft);border:1px solid var(--line)"></i>Site visit / task</span>${is("supervisor", "marketing", "specialist") ? "" : `<span><i style="background:var(--accent)"></i>Deal done</span>`}</div>
   ${dayPanel(state.calDay)}`;
 }
 function dayPanel(date) {
@@ -540,11 +578,12 @@ const SCHEMAS = {
     { k: "customer", l: "Customer name", t: "text" },
     { k: "phone", l: "Customer phone", t: "tel" },
     { k: "area", l: "Area / building / unit", t: "text" },
+    { k: "address", l: "Address (building, floor, apartment)", t: "text", wide: 1 },
     { k: "location", l: "Google Maps link or full address", t: "text", wide: 1 },
     { k: "items", l: "Items to deliver", t: "items", wide: 1 },
     { k: "quoteUrl", l: "Quotation link (Google Drive / PDF)", t: "url", wide: 1 },
     { k: "notes", l: "Details / what to do", t: "area" },
-    { k: "status", l: "Status", t: "select", opts: ["Open", "Done"], def: "Open" },
+    { k: "status", l: "Status", t: "select", opts: ["Open", "Done", "Cancelled"], def: "Open" },
     { k: "report", l: "Report from site", t: "area" }] },
   suppliers: { label: "supplier", fields: [
     { k: "name", l: "Supplier name", t: "text", req: 1 },
@@ -578,7 +617,7 @@ function fieldHtml(f, val, disabled) {
 function mapUrl(t) {
   const l = String(t.location || "").trim();
   if (l.startsWith("https://")) return l;
-  const q = l || t.area || "";
+  const q = l || [t.address, t.area].filter(Boolean).join(", ");
   return q ? "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q + (l ? "" : ", UAE")) : "";
 }
 function waNum(tel) { let n = tel.replace(/^\+/, ""); if (/^0\d{9}$/.test(n)) n = "971" + n.slice(1); return n; }
@@ -586,7 +625,7 @@ function taskDetail(t) {
   const tel = String(t.phone || "").replace(/[^\d+]/g, ""), map = mapUrl(t), a = 'style="text-decoration:none"';
   const line = (k, v) => v ? `<div><span class="muted">${k}:</span> ${esc(v)}</div>` : "";
   return `<div class="detail"><div class="row spread"><strong>${esc(t.type || "Task")} · ${t.due ? esc(fmtLong(t.due)) : "No date"}${t.time ? " · " + esc(fmtTime(t.time)) : ""}</strong><span class="pill">${esc(userName(t.assigneeUid) || "Unassigned")}</span></div>
-  ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}${itemsHtml(t.items)}
+  ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Address", t.address)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}${itemsHtml(t.items)}
   <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${String(t.quoteUrl || "").startsWith("https://") ? `<a class="btn" ${a} href="${esc(t.quoteUrl)}" target="_blank" rel="noopener">Quotation</a>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
 }
 let pushState = "";
@@ -709,6 +748,8 @@ document.addEventListener("keydown", e => {
 // ---------- events ----------
 app.addEventListener("click", async e => {
   if (e.target.closest("#pushOn")) { enablePush(); return; }
+  const vdn = e.target.closest("[data-visitdone]");
+  if (vdn) { openVisitDone(vdn.dataset.visitdone); return; }
   if (e.target.closest("#invAdd")) { addInvite(); return; }
   const cb = e.target.closest("[data-cal]");
   if (cb) { const k = Number(cb.dataset.cal); state.calMonth = k ? monthAdd(state.calMonth || today().slice(0, 7), k) : today().slice(0, 7); if (!k) state.calDay = today(); render(); return; }
