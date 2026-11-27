@@ -3,7 +3,8 @@
 // The sales agent POSTs one JSON message per sale / payment / update and gets "Saved" or the exact error back at once.
 // Actions: NEW SALE, PAYMENT, UPDATE (deals) · APPOINTMENT, APPOINTMENT UPDATE, APPOINTMENT CANCEL (specialist visits) · DELETE TEST
 // · full access: FIND, LIST DEALS, LIST TASKS, SUMMARY, LIST SUPPLIERS, LIST SUPPLIER PAYMENTS, LIST EXPENSES, LIST TEAM,
-//   TASK ADD, TASK UPDATE, SUPPLIER ADD, SUPPLIER UPDATE, SUPPLIER PAYMENT, EXPENSE ADD, ROLE (see admin() at the end).
+//   TASK ADD, TASK UPDATE, SUPPLIER ADD, SUPPLIER UPDATE, SUPPLIER PAYMENT, EXPENSE ADD, ROLE (see admin()).
+// App requests (no KEY, signed-in Firebase user): QUOTE PDF (see quotePdf() at the end).
 // Every call is also written to the "HQ Sales Log (webhook)" sheet as a backup.
 
 // The secret key lives in Project Settings > Script properties > KEY (never in this file, the repo is public).
@@ -21,6 +22,7 @@ function doGet() { return out({ ok: true, service: 'RoomVibe HQ sales webhook', 
 function doPost(e) {
   let body = {};
   try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) { return out({ ok: false, error: 'Body must be JSON.' }); }
+  if (body.idToken) return out(appRequest(body));   // the HQ app itself (signed-in user), see "app requests" below
   const KEY = PropertiesService.getScriptProperties().getProperty('KEY');
   if (!KEY) return out({ ok: false, error: 'Webhook not set up: Script property KEY is missing.' });
   if (body.key !== KEY) return out({ ok: false, error: 'Wrong key.' });
@@ -76,7 +78,7 @@ function handle(b) {
     const owner = seller ? seller.uid : '';
     const deal = Object.assign({
       customer: f.customer, phone: f.phone, area: f.area, location: f.location, package: f.package, source: f.source || 'Unknown',
-      items: f.items || [], quoteUrl: quoteUrl, quoteNo: f.quoteNo, stage: stage, ownerUid: owner, date: f.orderDate || today, closeDate: closeDate,
+      items: f.items || [], quoteUrl: quoteUrl, quoteFileId: fileIdOf(quoteUrl), quoteNo: f.quoteNo, stage: stage, ownerUid: owner, date: f.orderDate || today, closeDate: closeDate,
       deliveryDate: f.deliveryDate, notes: ['Quote ' + f.quoteNo, payNote, f.notes].filter(Boolean).join('\n'), createdAt: iso(), createdBy: AGENT
     }, stamp);
     const dealId = fs('post', '/deals', { fields: encFields(deal) }).name.split('/').pop();
@@ -92,7 +94,7 @@ function handle(b) {
   // ---- existing deal: PAYMENT / UPDATE (a repeated NEW SALE also updates) ----
   const d = found.data, dealId = found.id, upd = Object.assign({}, stamp);
   ['customer', 'phone', 'area', 'location', 'package'].forEach(k => { if (f[k]) upd[k] = f[k]; });
-  if (quoteUrl) upd.quoteUrl = quoteUrl;
+  if (quoteUrl) { upd.quoteUrl = quoteUrl; upd.quoteFileId = fileIdOf(quoteUrl); }
   if (f.items) upd.items = f.items;
   if (f.source) upd.source = f.source;
   if (seller) upd.ownerUid = seller.uid;
@@ -124,7 +126,9 @@ function handle(b) {
     if (f.time) tu.time = f.time;
     ['customer', 'phone', 'area', 'location'].forEach(k => { if (f[k]) tu[k] = f[k]; });
     if (f.items) tu.items = f.items;
-    if (quoteUrl) tu.quoteUrl = quoteUrl;
+    if (quoteUrl) { tu.quoteUrl = quoteUrl; tu.quoteFileId = fileIdOf(quoteUrl); }
+    if (!task.data.quoteNo) tu.quoteNo = f.quoteNo;
+    if (task.data.notes && noPay(task.data.notes) !== task.data.notes) tu.notes = noPay(task.data.notes);
     if (f.stage === 'Lost') tu.status = 'Cancelled';
     const moved = (f.deliveryDate && f.deliveryDate !== task.data.due) || (f.time && f.time !== task.data.time);
     if (moved && task.data.assigneeUid) {
@@ -147,7 +151,7 @@ function handle(b) {
 function addDelivery(dealId, x, supervisor, today, tomorrow, hour) {
   const title = ('Delivery: ' + (x.package || (x.items && x.items[0] && x.items[0].name) || 'order') + ' — ' + x.customer).slice(0, 120);
   const task = {
-    title: title, type: 'Delivery', assigneeUid: supervisor ? supervisor.uid : '', due: x.deliveryDate, time: x.time || '', dealId: dealId,
+    title: title, type: 'Delivery', assigneeUid: supervisor ? supervisor.uid : '', due: x.deliveryDate, time: x.time || '', dealId: dealId, quoteNo: x.quoteNo || '', quoteFileId: fileIdOf(x.quoteUrl),
     customer: x.customer || '', phone: x.phone || '', area: x.area || '', location: x.location || '', items: x.items || [], quoteUrl: x.quoteUrl || '', notes: '',
     status: 'Open', report: '', doneAt: '', notified: !!supervisor, remindEve: x.deliveryDate === tomorrow && hour >= 18, remindDay: x.deliveryDate === today && hour >= 8,
     createdAt: iso(), createdBy: AGENT, updatedAt: iso(), updatedBy: AGENT
@@ -174,7 +178,7 @@ function appointment(b, act) {
   }
   let type = '';
   if (str(b.type)) { type = APPT_TYPES.find(t => low(t) === low(b.type)) || ''; if (!type) throw new Error('type must be one of: ' + APPT_TYPES.join(', ') + '.'); }
-  const a = { customer: str(b.customer), phone: phone(b.phone), address: str(b.address), area: str(b.area), location: str(b.mapsLink || b.location), due: str(b.date), time: str(b.time), notes: str(b.notes), quoteNo: up(b.quoteNo) };
+  const a = { customer: str(b.customer), phone: phone(b.phone), address: str(b.address), area: str(b.area), location: str(b.mapsLink || b.location), due: str(b.date), time: str(b.time), notes: noPay(str(b.notes)), quoteNo: up(b.quoteNo) };
   if (a.due && !isDate(a.due)) throw new Error('date must be YYYY-MM-DD.');
   if (a.time && !/^\d{1,2}:\d{2}$/.test(a.time)) throw new Error('time must be HH:MM (24h), or leave it empty.');
   if (a.location && !/^https:\/\//.test(a.location)) { a.address = a.address || a.location; a.location = ''; }
@@ -521,7 +525,7 @@ function admin(b, act) {
     let dealId = ''; if (qn) { const d = findOne('deals', [eq('quoteNo', qn)]); if (!d) throw new Error('No deal with Quote No ' + qn + '.'); dealId = d.id; }
     let loc = str(b.mapsLink || b.location), addr = str(b.address); if (loc && !/^https:\/\//.test(loc)) { addr = addr || loc; loc = ''; }
     const task = Object.assign({ title: title.slice(0, 120), type: type, assigneeUid: who ? who.uid : '', due: due, time: time, dealId: dealId, quoteNo: qn,
-      customer: str(b.customer), phone: phone(b.phone), area: str(b.area), address: addr, location: loc, items: items(b.items) || [], quoteUrl: '', notes: str(b.notes),
+      customer: str(b.customer), phone: phone(b.phone), area: str(b.area), address: addr, location: loc, items: items(b.items) || [], quoteUrl: '', notes: noPay(str(b.notes)),
       status: 'Open', report: '', doneAt: '', notified: !!who, remindEve: due === tomorrow && hour >= 18, remindDay: due === today && hour >= 8, createdAt: iso(), createdBy: AGENT }, stamp());
     const id = fs('post', '/tasks', { fields: encFields(task) }).name.split('/').pop();
     if (who) pushTo([who], 'New task: ' + title, [due, time, task.area || addr].filter(Boolean).join(' · '), './#tasks', id);
@@ -537,7 +541,8 @@ function admin(b, act) {
     if (str(b.type)) upd.type = pick(TASK_TYPES, b.type, 'type');
     if (str(b.date)) { if (!isDate(str(b.date))) throw new Error('date must be YYYY-MM-DD.'); upd.due = str(b.date); }
     if (str(b.time)) { if (!/^\d{1,2}:\d{2}$/.test(str(b.time))) throw new Error('time must be HH:MM (24h).'); upd.time = str(b.time); }
-    ['customer', 'area', 'address', 'notes', 'report'].forEach(k => { if (str(b[k])) upd[k] = str(b[k]); });
+    ['customer', 'area', 'address', 'report'].forEach(k => { if (str(b[k])) upd[k] = str(b[k]); });
+    if (str(b.notes)) upd.notes = noPay(str(b.notes));
     if (str(b.phone)) upd.phone = phone(b.phone);
     if (str(b.mapsLink || b.location)) { const l = str(b.mapsLink || b.location); if (/^https:\/\//.test(l)) upd.location = l; else upd.address = upd.address || l; }
     if (b.items) upd.items = items(b.items) || [];
@@ -610,4 +615,95 @@ function admin(b, act) {
     return done({ email: email }, email + ' invited as ' + role + '. They get an email and can sign in with that Gmail.');
   }
   throw new Error('Unknown action.');
+}
+
+
+// ---------- app requests: quotation PDF inside the HQ app ----------
+// The app sends the signed-in user's Firebase ID token. Firestore itself checks that token (users/{uid} read with it),
+// then this script (running as the owner) reads the PDF from the Quotations folder and sends it back as base64.
+// Owner / admin / manager / sales: any deal or task. Supervisor / specialist / marketing: only tasks assigned to them.
+// Nothing about payments is sent: only the PDF, its name and the Quote No.
+const APP_FULL = ['owner', 'admin', 'manager', 'sales'], APP_FIELD = ['supervisor', 'specialist', 'marketing'];
+const MAX_PDF = 20 * 1024 * 1024;
+function appRequest(b) {
+  let res, who = null;
+  try { const r = quotePdf(b); who = r.who; res = r.res; } catch (err) { res = { ok: false, error: String((err && err.message) || err) }; }
+  try { appLog(b, res, who); } catch (err) {}
+  return res;
+}
+function appUser(idToken) {
+  const parts = String(idToken).split('.');
+  if (parts.length !== 3) throw new Error('Please sign in to the app again.');
+  let claims;
+  try { let p = parts[1]; while (p.length % 4) p += '='; claims = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(p)).getDataAsString()); }
+  catch (err) { throw new Error('Please sign in to the app again.'); }
+  const uid = str(claims.user_id || claims.sub);
+  if (claims.aud !== PROJECT || !/^[A-Za-z0-9]+$/.test(uid)) throw new Error('Please sign in to the app again.');
+  const r = UrlFetchApp.fetch(BASE + '/users/' + uid, { muteHttpExceptions: true, headers: { Authorization: 'Bearer ' + idToken } });
+  const code = r.getResponseCode();
+  if (code === 401 || code === 403) throw new Error('Your sign-in has expired. Close the app and open it again.');
+  if (code >= 300) throw new Error('Could not check your account (' + code + '). Try again.');
+  const u = decFields(JSON.parse(r.getContentText()).fields || {});
+  if (!u.active) throw new Error('Your access to the app is off. Ask Irfan.');
+  return Object.assign({ uid: uid }, u);
+}
+function getDocData(coll, id) {
+  if (!id || !/^[A-Za-z0-9]+$/.test(id)) return null;
+  try { return decFields(fs('get', '/' + coll + '/' + id).fields || {}); } catch (err) { return null; }
+}
+function fileIdOf(v) {
+  const s = str(v); if (!s) return '';
+  if (/^[A-Za-z0-9_-]{20,}$/.test(s)) return s;
+  const m = /\/d\/([A-Za-z0-9_-]{20,})/.exec(s) || /[?&]id=([A-Za-z0-9_-]{20,})/.exec(s);
+  return m ? m[1] : '';
+}
+function quotePdf(b) {
+  if (up(b.action) !== 'QUOTE PDF') throw new Error('Unknown app request.');
+  const me = appUser(b.idToken), full = APP_FULL.indexOf(me.role) >= 0;
+  if (!full && APP_FIELD.indexOf(me.role) < 0) throw new Error('Your role cannot open quotations.');
+  const tid = str(b.taskId), did = str(b.dealId);
+  let task = null, deal = null;
+  if (tid) {
+    task = getDocData('tasks', tid);
+    if (!task) throw new Error('This task was not found. It may have been deleted.');
+    if (!full && task.assigneeUid !== me.uid) throw new Error('This task is not assigned to you.');
+  } else if (did) {
+    if (!full) throw new Error('Open the quotation from your delivery or visit.');
+  } else throw new Error('No task or deal was given.');
+  const dealId = did || (task && task.dealId) || '';
+  if (dealId) deal = getDocData('deals', dealId);
+  if (!deal && task && task.quoteNo) { const f = findOne('deals', [eq('quoteNo', up(task.quoteNo))]); deal = f ? f.data : null; }
+  if (did && !deal) throw new Error('This deal was not found.');
+  const quoteNo = (deal && deal.quoteNo) || (task && task.quoteNo) || '';
+  const fid = fileIdOf(deal && (deal.quoteFileId || deal.quoteUrl)) || fileIdOf(task && (task.quoteFileId || task.quoteUrl));
+  if (!fid) throw new Error('No quotation PDF is attached to this ' + (task ? (task.type || 'task').toLowerCase() : 'deal') + ' yet. Ask the sales team to add it.');
+  let file;
+  try { file = DriveApp.getFileById(fid); file.getName(); } catch (err) { throw new Error('The quotation file was not found in Drive. It may have been deleted. Ask the sales team to add it again.'); }
+  if (file.isTrashed()) throw new Error('The quotation file is in the Drive bin. Ask the sales team to add it again.');
+  let inFolder = false; const ps = file.getParents(); while (ps.hasNext()) if (ps.next().getId() === QUOTES_FOLDER) inFolder = true;
+  if (!inFolder) throw new Error('This quotation is not in the "Quotations" folder, so the app cannot show it. Ask the sales team to send it again.');
+  const version = fid + ':' + file.getLastUpdated().getTime(), name = full ? file.getName() : 'Quotation ' + quoteNo;   // file names can hold prices
+  const who = { email: me.email || me.uid, role: me.role, quoteNo: quoteNo };
+  if (str(b.have) && str(b.have) === version) return { who: who, res: { ok: true, notModified: true, version: version, name: name, quoteNo: quoteNo } };
+  const mime = file.getMimeType();
+  let blob;
+  try { blob = mime === 'application/pdf' ? file.getBlob() : file.getAs('application/pdf'); } catch (err) { throw new Error('This quotation file is not a PDF and could not be turned into one.'); }
+  const bytes = blob.getBytes();
+  if (bytes.length > MAX_PDF) throw new Error('The quotation file is too big to open in the app (over 20 MB).');
+  return { who: who, res: { ok: true, version: version, name: name, quoteNo: quoteNo, size: bytes.length, pdfBase64: Utilities.base64Encode(bytes) } };
+}
+function appLog(b, res, who) {
+  const sh = logSheet();
+  const row = new Array(22).fill('');
+  row[0] = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm'); row[1] = res.ok ? 'OPENED' : 'ERROR'; row[2] = 'APP ' + up(b.action);
+  row[3] = who ? who.quoteNo : ''; row[17] = who ? who.email + ' (' + who.role + ')' : ''; row[20] = str(b.taskId || b.dealId);
+  row[21] = res.ok ? (res.notModified ? 'Quotation opened from phone cache' : 'Quotation sent (' + Math.round((res.size || 0) / 1024) + ' KB)') : res.error;
+  const r = sh.getLastRow() + 1;
+  sh.getRange(r, 1, 1, row.length).setNumberFormat('@').setValues([row.map(String)]);
+}
+
+// Payment details must never reach delivery staff: drop any sentence about payments from task / visit notes.
+const PAY_WORDS = /(paytabs|\bPTB\d+|\bpaid\b|\bpayments?\b|\bpay\b|tabby|tamara|deposit|advance|\bbalance\b|\bAED\b|\bdhs?\b|\bcard\b|\bcash\b|bank transfer|\breceipt\b|\binvoice\b)/i;
+function noPay(text) {
+  return str(text).split(/\r?\n/).map(line => line.split(/(?<=[.!?])\s+/).filter(x => !PAY_WORDS.test(x)).join(' ')).filter(l => l.trim()).join('\n');
 }
