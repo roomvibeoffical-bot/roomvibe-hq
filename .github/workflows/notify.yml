@@ -18,6 +18,11 @@ jobs:
       - name: Install Firebase Admin
         working-directory: notify
         run: npm install --no-save --no-audit --no-fund firebase-admin@12.7.0 nodemailer@6.9.16 google-auth-library@9.15.0
+      - name: Service account email (share the sales sheet with this)
+        continue-on-error: true
+        run: node -e "const j=JSON.parse(process.env.SA||'{}'); console.log('SA_EMAIL=' + String(j.client_email||'').split('@').join(' AT '))"
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
       - name: Import sales inbox (Google Sheet)
         working-directory: notify
         continue-on-error: true
