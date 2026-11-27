@@ -1,7 +1,9 @@
 // RoomVibe HQ – Sales webhook (Google Apps Script web app).
 // Owner: roomvibeoffical@gmail.com (the Firebase project owner). Deploy: Web app, Execute as: Me, Who has access: Anyone.
 // The sales agent POSTs one JSON message per sale / payment / update and gets "Saved" or the exact error back at once.
-// Actions: NEW SALE, PAYMENT, UPDATE (deals) · APPOINTMENT, APPOINTMENT UPDATE, APPOINTMENT CANCEL (specialist visits) · DELETE TEST.
+// Actions: NEW SALE, PAYMENT, UPDATE (deals) · APPOINTMENT, APPOINTMENT UPDATE, APPOINTMENT CANCEL (specialist visits) · DELETE TEST
+// · full access: FIND, LIST DEALS, LIST TASKS, SUMMARY, LIST SUPPLIERS, LIST SUPPLIER PAYMENTS, LIST EXPENSES, LIST TEAM,
+//   TASK ADD, TASK UPDATE, SUPPLIER ADD, SUPPLIER UPDATE, SUPPLIER PAYMENT, EXPENSE ADD, ROLE (see admin() at the end).
 // Every call is also written to the "HQ Sales Log (webhook)" sheet as a backup.
 
 // The secret key lives in Project Settings > Script properties > KEY (never in this file, the repo is public).
@@ -44,6 +46,7 @@ function setup() {
 function handle(b) {
   const act = up(b.action).replace(/[_-]/g, ' ');
   if (act.indexOf('APPOINTMENT') === 0) return appointment(b, act);
+  if (ADMIN_ACTIONS.indexOf(act) >= 0) return admin(b, act);
   const f = read(b);
   const now = new Date(), today = day(now), tomorrow = day(new Date(now.getTime() + 864e5)), hour = Number(Utilities.formatDate(now, TZ, 'H'));
   const users = listUsers();
@@ -230,7 +233,7 @@ function appointment(b, act) {
 // ---------- input ----------
 function read(b) {
   const action = up(b.action || 'NEW SALE').replace(/[_-]/g, ' ');
-  if (['NEW SALE', 'PAYMENT', 'UPDATE', 'DELETE TEST'].indexOf(action) < 0) throw new Error('action must be NEW SALE, PAYMENT or UPDATE.');
+  if (['NEW SALE', 'PAYMENT', 'UPDATE', 'DELETE TEST'].indexOf(action) < 0) throw new Error('Unknown action. Use NEW SALE, PAYMENT, UPDATE, APPOINTMENT…, or one of: ' + ADMIN_ACTIONS.join(', ') + '.');
   const f = {
     action: action, quoteNo: up(b.quoteNo), customer: str(b.customer), phone: phone(b.phone), area: str(b.area), location: str(b.location || b.mapsLink),
     package: str(b.package), items: items(b.items), value: money(b.total, 'total'), paid: money(b.paid, 'paid'), method: str(b.method), orderDate: str(b.orderDate),
@@ -377,4 +380,234 @@ function log(b, res) {
     str(b.salesEmail || b.seller), res.quoteUrl || str(b.quoteUrl), str(b.notes), res.dealId || res.appointmentId || '', res.ok ? res.message : res.error].map(String);
   const r = sh.getLastRow() + 1;
   sh.getRange(r, 1, 1, row.length).setNumberFormat('@').setValues([row]);
+}
+
+// ---------- full HQ access for the sales agent (read + manage) ----------
+// Reads: FIND, LIST DEALS, LIST TASKS, SUMMARY, LIST SUPPLIERS, LIST SUPPLIER PAYMENTS, LIST EXPENSES, LIST TEAM.
+// Writes: TASK ADD, TASK UPDATE, SUPPLIER ADD, SUPPLIER UPDATE, SUPPLIER PAYMENT, EXPENSE ADD, ROLE.
+// Safety: nothing is deleted here; owner accounts can never be changed and nobody can be made owner.
+const ADMIN_ACTIONS = ['FIND', 'LIST DEALS', 'LIST TASKS', 'SUMMARY', 'LIST SUPPLIERS', 'LIST SUPPLIER PAYMENTS', 'LIST EXPENSES', 'LIST TEAM',
+  'TASK ADD', 'TASK UPDATE', 'SUPPLIER ADD', 'SUPPLIER UPDATE', 'SUPPLIER PAYMENT', 'EXPENSE ADD', 'ROLE'];
+const TASK_TYPES = ['Delivery', 'Measurement', 'Curtains', 'Fabric samples', 'Site visit', 'Follow-up', 'Supplier pickup', 'Other'];
+const TASK_STATUS = ['Open', 'Done', 'Cancelled'];
+const WON = ['Advance paid', 'Delivery scheduled', 'Delivered'];
+const EXP_CATS = ['Google Ads', 'Meta Ads', 'Salaries', 'Delivery & transport', 'Rent & office', 'Other'];
+const PAY_METHODS = ['Bank transfer', 'Cash', 'Card', 'Cheque'];
+const GIVE_ROLES = ['admin', 'manager', 'sales', 'supervisor', 'specialist', 'marketing'];
+const MAX_LIST = 100;
+
+function listAll(coll) {
+  let docs = [], token = '';
+  do {
+    const r = fs('get', '/' + coll + '?pageSize=300' + (token ? '&pageToken=' + encodeURIComponent(token) : ''));
+    (r.documents || []).forEach(d => docs.push({ id: d.name.split('/').pop(), data: decFields(d.fields || {}) }));
+    token = r.nextPageToken || '';
+  } while (token);
+  return docs;
+}
+function pick(list, v, label) {           // exact match from a fixed list, case-insensitive
+  if (!str(v)) return '';
+  const x = list.find(o => low(o) === low(v)) || list.find(o => low(o).indexOf(low(v)) === 0);
+  if (!x) throw new Error(label + ' must be one of: ' + list.join(', ') + '.');
+  return x;
+}
+function person(users, v) {
+  const q = low(v); if (!q) return null;
+  const act = users.filter(u => u.active);
+  const u = act.find(x => low(x.email) === q) || act.find(x => low(x.name) === q) || act.find(x => low(x.name).indexOf(q) >= 0);
+  if (!u) throw new Error('"' + str(v) + '" is not an active app user. Use LIST TEAM to see names and Gmails.');
+  return u;
+}
+const uname = (users, uid) => { const u = users.find(x => x.uid === uid); return u ? (u.name || u.email) : (uid ? 'unknown user' : 'Unassigned'); };
+const inRange = (d, a, b) => !!d && d >= a && d <= b;
+function range(b) {
+  const t = day(new Date()), a = str(b.from) || t.slice(0, 8) + '01', z = str(b.to) || t;
+  if (!isDate(a) || !isDate(z)) throw new Error('from / to must be YYYY-MM-DD.');
+  return [a, z];
+}
+function moneyMap() { const m = {}; listAll('dealMoney').forEach(x => m[x.id] = x.data); return m; }
+function dealOut(x, m, users, tasks) {
+  const d = x.data, mm = m[x.id] || {}, value = Number(mm.value) || 0, paid = Number(mm.paid) || 0;
+  const o = { dealId: x.id, quoteNo: d.quoteNo || '', customer: d.customer || '', phone: d.phone || '', area: d.area || '', package: d.package || '', stage: d.stage || 'New lead',
+    total: value, paid: paid, balance: Math.max(0, value - paid), leadDate: d.date || '', orderDate: d.closeDate || '', deliveryDate: d.deliveryDate || '',
+    salesPerson: uname(users, d.ownerUid), source: d.source || '', quoteUrl: d.quoteUrl || '', items: d.items || [], notes: d.notes || '' };
+  if (tasks) o.tasks = tasks.filter(t => t.data.dealId === x.id).map(t => taskOut(t, users));
+  return o;
+}
+function taskOut(t, users) {
+  const x = t.data;
+  return { taskId: t.id, type: x.type || '', title: x.title || '', date: x.due || '', time: x.time || '', status: x.status || 'Open', assignedTo: uname(users, x.assigneeUid),
+    customer: x.customer || '', phone: x.phone || '', area: x.area || '', address: x.address || '', mapsLink: x.location || '', quoteNo: x.quoteNo || '', dealId: x.dealId || '',
+    notes: x.notes || '', report: x.report || '' };
+}
+
+function admin(b, act) {
+  const users = listUsers(), now = new Date(), today = day(now), tomorrow = day(new Date(now.getTime() + 864e5)), hour = Number(Utilities.formatDate(now, TZ, 'H'));
+  const bosses = users.filter(u => u.active && (u.role === 'owner' || u.role === 'admin'));
+  const stamp = () => ({ updatedAt: iso(), updatedBy: AGENT });
+  const done = (o, msg) => Object.assign({ ok: true, action: act, message: msg }, o);
+
+  // ===== reads =====
+  if (act === 'FIND') {
+    const q = str(b.q || b.quoteNo || b.phone || b.customer); if (!q) throw new Error('Send q: a Quote No, phone or customer name.');
+    const digits = q.replace(/\D/g, '').slice(-9), deals = listAll('deals'), m = moneyMap(), tasks = listAll('tasks');
+    const hit = deals.filter(x => { const d = x.data;
+      return up(d.quoteNo) === up(q) || (digits.length >= 7 && String(d.phone || '').replace(/\D/g, '').indexOf(digits) >= 0) || low(d.customer).indexOf(low(q)) >= 0; }).slice(0, 20);
+    return done({ count: hit.length, deals: hit.map(x => dealOut(x, m, users, tasks)) }, hit.length ? 'Found ' + hit.length + ' deal(s) for "' + q + '".' : 'No deal found for "' + q + '".');
+  }
+  if (act === 'LIST DEALS') {
+    const m = moneyMap(), stage = str(b.stage), unpaid = str(b.unpaid).toLowerCase() === 'true';
+    if (stage && stage !== 'Open' && stage !== 'All' && STAGES.indexOf(stage) < 0) throw new Error('stage must be Open, All, or one of: ' + STAGES.join(', '));
+    let list = listAll('deals');
+    if (unpaid) list = list.filter(x => WON.indexOf(x.data.stage) >= 0 && (Number((m[x.id] || {}).value) || 0) > (Number((m[x.id] || {}).paid) || 0));
+    else {
+      if (stage === 'Open' || !stage) list = list.filter(x => ['Delivered', 'Lost'].indexOf(x.data.stage) < 0);
+      else if (stage !== 'All') list = list.filter(x => (x.data.stage || 'New lead') === stage);
+      if (str(b.from) || str(b.to)) { const r = range(b); list = list.filter(x => inRange(x.data.date, r[0], r[1])); }
+    }
+    list.sort((p, q) => String(q.data.date || '').localeCompare(String(p.data.date || '')));
+    const outList = list.slice(0, MAX_LIST).map(x => dealOut(x, m, users));
+    const due = outList.reduce((s, d) => s + d.balance, 0);
+    return done({ count: list.length, deals: outList }, list.length + ' deal(s)' + (unpaid ? ' with money still to collect: AED ' + due : '') + (list.length > MAX_LIST ? ' (first ' + MAX_LIST + ' shown)' : '') + '.');
+  }
+  if (act === 'LIST TASKS') {
+    const type = str(b.type) ? pick(TASK_TYPES, b.type, 'type') : '', status = str(b.status) ? (low(b.status) === 'all' ? 'All' : pick(TASK_STATUS, b.status, 'status')) : 'Open';
+    const who = str(b.assignee) ? person(users, b.assignee) : null;
+    let list = listAll('tasks').filter(t => (!type || t.data.type === type) && (status === 'All' || (t.data.status || 'Open') === status) && (!who || t.data.assigneeUid === who.uid));
+    if (str(b.from) || str(b.to)) { const r = range(b); list = list.filter(t => inRange(t.data.due, r[0], r[1])); }
+    list.sort((p, q) => ((p.data.due || '9') + (p.data.time || '')).localeCompare((q.data.due || '9') + (q.data.time || '')));
+    return done({ count: list.length, tasks: list.slice(0, MAX_LIST).map(t => taskOut(t, users)) }, list.length + ' task(s).');
+  }
+  if (act === 'SUMMARY') {
+    const r = range(b), m = moneyMap(), deals = listAll('deals'), pays = listAll('payments'), exps = listAll('expenses');
+    const val = x => Number((m[x.id] || {}).value) || 0, paidOf = x => Number((m[x.id] || {}).paid) || 0;
+    const won = deals.filter(x => WON.indexOf(x.data.stage) >= 0 && inRange(x.data.closeDate, r[0], r[1]));
+    const sales = won.reduce((s, x) => s + val(x), 0);
+    const sup = pays.filter(p => inRange(p.data.date, r[0], r[1])).reduce((s, p) => s + (Number(p.data.amount) || 0), 0);
+    const ex = exps.filter(e => inRange(e.data.date, r[0], r[1])), sum = f => ex.filter(f).reduce((s, e) => s + (Number(e.data.amount) || 0), 0);
+    const google = sum(e => e.data.category === 'Google Ads'), meta = sum(e => e.data.category === 'Meta Ads'), other = sum(e => ['Google Ads', 'Meta Ads'].indexOf(e.data.category) < 0);
+    const leads = deals.filter(x => inRange(x.data.date, r[0], r[1])).length;
+    const toCollect = deals.filter(x => WON.indexOf(x.data.stage) >= 0).reduce((s, x) => s + Math.max(0, val(x) - paidOf(x)), 0);
+    const costs = sup + google + meta + other;
+    const s = { from: r[0], to: r[1], sales: sales, orders: won.length, paidToSuppliers: sup, googleAds: google, metaAds: meta, otherExpenses: other, profitEstimate: sales - costs, newLeads: leads, stillToCollect: toCollect };
+    return done({ summary: s }, r[0] + ' to ' + r[1] + ': sales AED ' + sales + ' (' + won.length + ' orders), costs AED ' + costs + ', profit (estimate) AED ' + (sales - costs) + ', still to collect AED ' + toCollect + '.');
+  }
+  if (act === 'LIST SUPPLIERS') {
+    const list = listAll('suppliers').map(x => ({ supplierId: x.id, name: x.data.name || '', phone: x.data.phone || '', category: x.data.category || '', notes: x.data.notes || '' }));
+    return done({ count: list.length, suppliers: list }, list.length + ' supplier(s).');
+  }
+  if (act === 'LIST SUPPLIER PAYMENTS' || act === 'LIST EXPENSES') {
+    const r = range(b), sups = {}; listAll('suppliers').forEach(x => sups[x.id] = x.data.name);
+    const isPay = act === 'LIST SUPPLIER PAYMENTS';
+    const list = listAll(isPay ? 'payments' : 'expenses').filter(x => inRange(x.data.date, r[0], r[1])).sort((p, q) => String(q.data.date).localeCompare(String(p.data.date)))
+      .map(x => isPay ? { paymentId: x.id, supplier: sups[x.data.supplierId] || '', amount: Number(x.data.amount) || 0, date: x.data.date || '', method: x.data.method || '', note: x.data.note || '' }
+                      : { expenseId: x.id, category: x.data.category || '', amount: Number(x.data.amount) || 0, date: x.data.date || '', note: x.data.note || '' });
+    const total = list.reduce((s, x) => s + x.amount, 0);
+    return done({ count: list.length, total: total, items: list.slice(0, MAX_LIST) }, list.length + (isPay ? ' supplier payment(s)' : ' expense(s)') + ', total AED ' + total + ' (' + r[0] + ' to ' + r[1] + ').');
+  }
+  if (act === 'LIST TEAM') {
+    const list = users.map(u => ({ name: u.name || '', email: u.email || '', role: u.role || '', active: !!u.active }));
+    const inv = listAll('invites').filter(i => !users.some(u => low(u.email) === i.id)).map(i => ({ email: i.id, role: i.data.role || '', status: 'invited, not signed in yet' }));
+    return done({ team: list, invites: inv }, list.length + ' people in the app' + (inv.length ? ', ' + inv.length + ' invited' : '') + '.');
+  }
+
+  // ===== writes =====
+  if (act === 'TASK ADD') {
+    const title = str(b.title), type = pick(TASK_TYPES, b.type || 'Other', 'type'), due = str(b.date), time = str(b.time);
+    if (!title) throw new Error('title is required (what needs doing).');
+    if (due && !isDate(due)) throw new Error('date must be YYYY-MM-DD.');
+    if (time && !/^\d{1,2}:\d{2}$/.test(time)) throw new Error('time must be HH:MM (24h).');
+    const who = str(b.assignee) ? person(users, b.assignee) : null, qn = up(b.quoteNo);
+    let dealId = ''; if (qn) { const d = findOne('deals', [eq('quoteNo', qn)]); if (!d) throw new Error('No deal with Quote No ' + qn + '.'); dealId = d.id; }
+    let loc = str(b.mapsLink || b.location), addr = str(b.address); if (loc && !/^https:\/\//.test(loc)) { addr = addr || loc; loc = ''; }
+    const task = Object.assign({ title: title.slice(0, 120), type: type, assigneeUid: who ? who.uid : '', due: due, time: time, dealId: dealId, quoteNo: qn,
+      customer: str(b.customer), phone: phone(b.phone), area: str(b.area), address: addr, location: loc, items: items(b.items) || [], quoteUrl: '', notes: str(b.notes),
+      status: 'Open', report: '', doneAt: '', notified: !!who, remindEve: due === tomorrow && hour >= 18, remindDay: due === today && hour >= 8, createdAt: iso(), createdBy: AGENT }, stamp());
+    const id = fs('post', '/tasks', { fields: encFields(task) }).name.split('/').pop();
+    if (who) pushTo([who], 'New task: ' + title, [due, time, task.area || addr].filter(Boolean).join(' · '), './#tasks', id);
+    return done({ taskId: id }, 'Task saved: ' + type + ' · ' + title + (due ? ' · ' + due + (time ? ' ' + time : '') : '') + ' (' + (who ? who.name || who.email : 'Unassigned') + '). taskId ' + id + '.');
+  }
+  if (act === 'TASK UPDATE') {
+    let t = null, id = str(b.taskId);
+    if (id) { if (!/^[A-Za-z0-9]+$/.test(id)) throw new Error('taskId is not valid.'); try { t = { id: id, data: decFields(fs('get', '/tasks/' + id).fields || {}) }; } catch (err) { throw new Error('No task with taskId ' + id + '.'); } }
+    else if (up(b.quoteNo)) { const d = findOne('deals', [eq('quoteNo', up(b.quoteNo))]); if (!d) throw new Error('No deal with Quote No ' + up(b.quoteNo) + '.'); t = findOne('tasks', [eq('dealId', d.id), eq('type', 'Delivery')]); if (!t) throw new Error('Quote No ' + up(b.quoteNo) + ' has no delivery yet. Send UPDATE with deliveryDate first.'); id = t.id; }
+    else throw new Error('Send taskId, or quoteNo to change that order\'s delivery.');
+    const cur = t.data, upd = stamp();
+    if (str(b.title)) upd.title = str(b.title).slice(0, 120);
+    if (str(b.type)) upd.type = pick(TASK_TYPES, b.type, 'type');
+    if (str(b.date)) { if (!isDate(str(b.date))) throw new Error('date must be YYYY-MM-DD.'); upd.due = str(b.date); }
+    if (str(b.time)) { if (!/^\d{1,2}:\d{2}$/.test(str(b.time))) throw new Error('time must be HH:MM (24h).'); upd.time = str(b.time); }
+    ['customer', 'area', 'address', 'notes', 'report'].forEach(k => { if (str(b[k])) upd[k] = str(b[k]); });
+    if (str(b.phone)) upd.phone = phone(b.phone);
+    if (str(b.mapsLink || b.location)) { const l = str(b.mapsLink || b.location); if (/^https:\/\//.test(l)) upd.location = l; else upd.address = upd.address || l; }
+    if (b.items) upd.items = items(b.items) || [];
+    let who = null;
+    if (str(b.assignee)) { if (low(b.assignee) === 'none' || low(b.assignee) === 'unassigned') upd.assigneeUid = ''; else { who = person(users, b.assignee); upd.assigneeUid = who.uid; } }
+    if (str(b.status)) { upd.status = pick(TASK_STATUS, b.status, 'status'); upd.doneAt = upd.status === 'Done' ? (cur.doneAt || iso()) : ''; }
+    const target = who || users.find(u => u.uid === (upd.assigneeUid !== undefined ? upd.assigneeUid : cur.assigneeUid)) || null;
+    const moved = ['due', 'time', 'address', 'area', 'location', 'assigneeUid'].some(k => upd[k] !== undefined && upd[k] !== cur[k]);
+    if (moved && target && (upd.status || cur.status) === 'Open') { const due = upd.due || cur.due; Object.assign(upd, { notified: true, remindEve: due === tomorrow && hour >= 18, remindDay: due === today && hour >= 8 }); }
+    fs('patch', '/tasks/' + id + '?' + mask(Object.keys(upd)), { fields: encFields(upd) });
+    const m2 = Object.assign({}, cur, upd);
+    if (moved && target && m2.status === 'Open') pushTo([target], (who && who.uid !== cur.assigneeUid ? 'New ' : 'Changed ') + (m2.type || 'task').toLowerCase() + ': ' + (m2.customer || m2.title), [m2.due, m2.time, m2.area || m2.address].filter(Boolean).join(' · '), m2.type === 'Delivery' ? './#tasks' : './#visits', id);
+    if (upd.status === 'Done' && m2.dealId && m2.type === 'Delivery') pushTo(bosses, 'Delivered: ' + (m2.customer || ''), m2.due || '', './#tasks', id);
+    return done({ taskId: id }, 'Task updated: ' + (m2.type || '') + ' · ' + (m2.customer || m2.title) + ' · ' + [m2.due, m2.time].filter(Boolean).join(' ') + ' · ' + (m2.status || 'Open') + ' (' + uname(users, m2.assigneeUid) + ').');
+  }
+  if (act === 'SUPPLIER ADD' || act === 'SUPPLIER UPDATE' || act === 'SUPPLIER PAYMENT') {
+    const sups = listAll('suppliers'), sid = str(b.supplierId), sname = str(b.supplier || b.name);
+    const find = () => sid ? sups.find(x => x.id === sid) : (sups.find(x => low(x.data.name) === low(sname)) || sups.find(x => low(x.data.name).indexOf(low(sname)) >= 0 && sname));
+    if (act === 'SUPPLIER ADD') {
+      if (!sname) throw new Error('name is required.');
+      if (sups.some(x => low(x.data.name) === low(sname))) throw new Error('Supplier "' + sname + '" already exists. Use SUPPLIER UPDATE.');
+      const rec = Object.assign({ name: sname, phone: phone(b.phone), category: str(b.category), notes: str(b.notes), createdAt: iso(), createdBy: AGENT }, stamp());
+      const id = fs('post', '/suppliers', { fields: encFields(rec) }).name.split('/').pop();
+      return done({ supplierId: id }, 'Supplier saved: ' + sname + '. supplierId ' + id + '.');
+    }
+    const s = find(); if (!s) throw new Error('Supplier "' + (sid || sname) + '" not found. Use LIST SUPPLIERS, or SUPPLIER ADD first.');
+    if (act === 'SUPPLIER UPDATE') {
+      const upd = stamp();
+      if (str(b.newName)) upd.name = str(b.newName);
+      if (str(b.phone)) upd.phone = phone(b.phone);
+      ['category', 'notes'].forEach(k => { if (str(b[k])) upd[k] = str(b[k]); });
+      fs('patch', '/suppliers/' + s.id + '?' + mask(Object.keys(upd)), { fields: encFields(upd) });
+      return done({ supplierId: s.id }, 'Supplier updated: ' + (upd.name || s.data.name) + '.');
+    }
+    const amount = money(b.amount, 'amount'); if (!amount) throw new Error('amount is required (AED).');
+    const date = str(b.date) || today; if (!isDate(date)) throw new Error('date must be YYYY-MM-DD.');
+    let method = 'Bank transfer'; if (str(b.method)) method = low(b.method) === 'bank' ? 'Bank transfer' : pick(PAY_METHODS, b.method, 'method');
+    let dealId = ''; if (up(b.quoteNo)) { const d = findOne('deals', [eq('quoteNo', up(b.quoteNo))]); if (!d) throw new Error('No deal with Quote No ' + up(b.quoteNo) + '.'); dealId = d.id; }
+    const rec = Object.assign({ supplierId: s.id, amount: amount, date: date, method: method, dealId: dealId, note: str(b.note || b.notes), createdAt: iso(), createdBy: AGENT }, stamp());
+    const id = fs('post', '/payments', { fields: encFields(rec) }).name.split('/').pop();
+    pushTo(bosses, 'Supplier paid: ' + s.data.name, 'AED ' + amount + ' · ' + method + ' · ' + date, './#suppliers', 'pay-' + id);
+    return done({ paymentId: id }, 'Supplier payment saved: ' + s.data.name + ', AED ' + amount + ', ' + method + ', ' + date + '.');
+  }
+  if (act === 'EXPENSE ADD') {
+    const category = pick(EXP_CATS, b.category, 'category'); if (!category) throw new Error('category is required: ' + EXP_CATS.join(', ') + '.');
+    const amount = money(b.amount, 'amount'); if (!amount) throw new Error('amount is required (AED).');
+    const date = str(b.date) || today; if (!isDate(date)) throw new Error('date must be YYYY-MM-DD.');
+    const rec = Object.assign({ category: category, amount: amount, date: date, note: str(b.note || b.notes), createdAt: iso(), createdBy: AGENT }, stamp());
+    const id = fs('post', '/expenses', { fields: encFields(rec) }).name.split('/').pop();
+    return done({ expenseId: id }, 'Expense saved: ' + category + ', AED ' + amount + ', ' + date + '.');
+  }
+  if (act === 'ROLE') {
+    const email = low(b.email); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('email is required (their Gmail).');
+    if (low(b.role) === 'owner') throw new Error('Nobody can be made Owner through the agent. Only Irfan can do that in the app.');
+    const role = str(b.role) ? pick(GIVE_ROLES, b.role, 'role') : '';
+    const active = str(b.active) ? str(b.active).toLowerCase() === 'true' : null;
+    if (!role && active === null) throw new Error('Send role, or active true / false.');
+    const u = users.find(x => low(x.email) === email);
+    if (u) {
+      if (u.role === 'owner') throw new Error(email + ' is an Owner. Owner accounts can only be changed by Irfan in the app.');
+      const upd = {}; if (role) { upd.role = role; upd.active = active === null ? true : active; } else upd.active = active;
+      fs('patch', '/users/' + u.uid + '?' + mask(Object.keys(upd)), { fields: encFields(upd) });
+      const msg = (u.name || email) + ': ' + (role ? 'role ' + role : '') + (role ? ', ' : '') + 'access ' + (upd.active ? 'on' : 'off') + '.';
+      pushTo(bosses, 'Team change by sales agent', msg, './#team', 'role-' + u.uid);
+      return done({ email: email }, 'Saved. ' + msg);
+    }
+    if (!role) throw new Error(email + ' has not signed in to the app yet. Send a role to invite them.');
+    fs('patch', '/invites/' + encodeURIComponent(email), { fields: encFields({ role: role, invitedBy: AGENT, createdAt: iso() }) });
+    pushTo(bosses, 'Team change by sales agent', email + ' invited as ' + role, './#team', 'inv-' + email);
+    return done({ email: email }, email + ' invited as ' + role + '. They get an email and can sign in with that Gmail.');
+  }
+  throw new Error('Unknown action.');
 }
