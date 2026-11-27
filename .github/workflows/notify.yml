@@ -17,7 +17,14 @@ jobs:
           node-version: 20
       - name: Install Firebase Admin
         working-directory: notify
-        run: npm install --no-save --no-audit --no-fund firebase-admin@12.7.0 nodemailer@6.9.16
+        run: npm install --no-save --no-audit --no-fund firebase-admin@12.7.0 nodemailer@6.9.16 google-auth-library@9.15.0
+      - name: Import sales inbox (Google Sheet)
+        working-directory: notify
+        continue-on-error: true
+        run: node inbox.mjs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          SALES_SHEET_ID: 1J3RtsxNhkgPxDJHFab2pRT2sv1JVk-mZ3dNNbesOIhg
       - name: Send notifications
         working-directory: notify
         run: node notify.mjs
