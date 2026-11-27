@@ -703,7 +703,7 @@ function appLog(b, res, who) {
 }
 
 // Payment details must never reach delivery staff: drop any sentence about payments from task / visit notes.
-const PAY_WORDS = /(paytabs|\bPTB\d+|\bpaid\b|\bpayments?\b|\bpay\b|tabby|tamara|deposit|advance|\bbalance\b|\bAED\b|\bdhs?\b|\bcard\b|\bcash\b|bank transfer|\breceipt\b|\binvoice\b)/i;
+const PAY_WORDS = /(paytabs|\bPTB\d+|\bpaid\b|\bpayments?\b|\bpay\b|tabby|tamara|deposit|advance|\bbalance\b|\bAED\b|\bdhs?\b|\bcard\b|\bcash\b|bank transfer|\breceipt\b|\binvoice\b|dirhams?|\bbaa?qi\b|\bbaa?ki\b|remaining|outstanding|\bCOD\b|\bprice\b|discount)/i;
 function noPay(text) {
   return str(text).split(/\r?\n/).map(line => line.split(/(?<=[.!?])\s+/).filter(x => !PAY_WORDS.test(x)).join(' ')).filter(l => l.trim()).join('\n');
 }

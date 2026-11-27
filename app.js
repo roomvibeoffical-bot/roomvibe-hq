@@ -13,6 +13,9 @@ const firebaseConfig = {
   appId: "1:735051890725:web:e0c222c8c9783c5176bfcc"
 };
 const BOOT_OWNERS = ["roomvibeoffical@gmail.com", "irfanaligroumaskhan@gmail.com"];
+// App server (Google Apps Script, runs as the owner). The app only sends the signed-in user's ID token; the server checks the role.
+const HQ_API = "https://script.google.com/macros/s/AKfycby7rT-yMRMKwceC4HmHY-OsIBuTGnKsxnHy16pfAUQF_MtdPQe7nwIeZ8bAEIkWNoY5/exec";
+const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
@@ -58,6 +61,11 @@ const fmtLong = s => { const d = new Date(s + "T00:00:00"); return isNaN(d) ? s 
 const fmtTime = s => { const m = /^(\d{1,2}):(\d{2})/.exec(s || ""); if (!m) return s || ""; let h = +m[1]; const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return h + ":" + m[2] + " " + ap; };
 const safeUrl = u => (typeof u === "string" && u.startsWith("https://")) ? u : "icon-192.png";
 const inR = (s, a, b) => typeof s === "string" && s >= a && s <= b;
+const fileIdOf = v => { const s = String(v || "").trim(); if (/^[A-Za-z0-9_-]{20,}$/.test(s)) return s; const m = /\/d\/([A-Za-z0-9_-]{20,})/.exec(s) || /[?&]id=([A-Za-z0-9_-]{20,})/.exec(s); return m ? m[1] : ""; };
+// Delivery staff can read task notes, so payment details must never be written there (same words the server removes).
+const PAY_RE = /(paytabs|\bPTB\d+|\bpaid\b|\bpayments?\b|\bpay\b|tabby|tamara|deposit|advance|\bbalance\b|\bAED\b|\bdhs?\b|\bcard\b|\bcash\b|bank transfer|\breceipt\b|\binvoice\b|dirhams?|\bbaa?qi\b|\bbaa?ki\b|remaining|outstanding|\bCOD\b|\bprice\b|discount)/i;
+const PAY_MSG = "Remove payment details (amounts, paid, card, PayTabs…) from the delivery notes. The delivery team can see them. Put them in the deal's internal notes instead.";
+const userErr = m => Object.assign(new Error(m), { userMsg: m });
 function presetRange(p) {
   const t = today(), d = new Date(t + "T00:00:00");
   switch (p) {
@@ -92,6 +100,7 @@ const dealPaid = d => num(data.money[d.id] && data.money[d.id].paid);
 const hasMoney = d => !!data.money[d.id];
 function setMsg(m, bad) { state.msg = m || ""; state.msgBad = !!bad; render(); }
 function errText(e) {
+  if (e && e.userMsg) return e.userMsg;
   if (e && e.code === "permission-denied") return "You don't have permission for this. Ask the owner.";
   if (e && e.code === "unavailable") return "No internet right now. Your change will be sent when you're back online.";
   return "Couldn't save. Check your internet and try again.";
@@ -325,7 +334,7 @@ function visitCard(x) {
   ${where ? `<div style="margin-top:4px">${esc(where)}</div>` : ""}
   ${x.notes ? `<div class="muted" style="margin-top:6px;white-space:pre-wrap">${esc(x.notes)}</div>` : ""}
   ${x.report ? `<div style="margin-top:6px;white-space:pre-wrap"><span class="muted">Result:</span> ${esc(x.report)}</div>` : ""}
-  <div class="row" style="margin-top:10px;flex-wrap:wrap">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call ${esc(x.phone)}</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${map ? `<a class="btn" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}<button class="btn primary" data-visitdone="${esc(x.id)}">${done ? "Edit result" : "Done"}</button></div></div>`;
+  <div class="row" style="margin-top:10px;flex-wrap:wrap">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call ${esc(x.phone)}</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${map ? `<a class="btn" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}${taskHasQuote(x) ? `<button class="btn" type="button" data-quote-task="${esc(x.id)}">📄 Quotation</button>` : ""}<button class="btn primary" data-visitdone="${esc(x.id)}">${done ? "Edit result" : "Done"}</button></div></div>`;
 }
 function vVisits() {
   const t = today(), key = x => (x.due || "9999-99-99") + " " + (x.time || "99:99");
@@ -520,7 +529,8 @@ function openDelivery(date) {
     { k: "assigneeUid", l: "Supervisor", t: "user", roles: ["supervisor", "manager", "admin", "owner"] },
     { k: "closeDate", l: "Deal confirmed on", t: "date", def: today() },
     ...(moneyOK ? [{ k: "value", l: "Deal value (AED)", t: "num" }, { k: "paid", l: "Received so far (AED)", t: "num" }] : []),
-    { k: "notes", l: "Notes for supervisor", t: "area" }];
+    { k: "notes", l: "Notes for supervisor (no payment info)", t: "area" },
+    { k: "dealNotes", l: "Internal notes (sales & admin only)", t: "area" }];
   modal.innerHTML = `<div class="scrim" data-close="1"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mt"><div class="row spread"><h2 id="mt">New delivery · ${esc(fmtLong(date))}</h2><button class="btn" data-close="1" aria-label="Close">✕</button></div>
   <p class="muted" style="margin:6px 0 0">Saves the customer deal and puts the delivery on the supervisor's calendar.</p>
   <form id="frm" class="form">${F.map(f => fieldHtml(f, f.def || (f.t === "items" ? [] : ""), false)).join("")}</form><div class="err" id="ferr"></div>
@@ -537,14 +547,15 @@ function openDelivery(date) {
       if (f.req && !x) { err.textContent = f.l + " is required."; el.focus(); return; }
     }
     if (!v.due) { err.textContent = "Delivery date is required."; return; }
+    if (PAY_RE.test(v.notes || "")) { err.textContent = PAY_MSG; document.getElementById("f_notes").focus(); return; }
     sv.disabled = true; sv.textContent = "Saving…"; err.textContent = "";
     try {
       const stamp = { updatedAt: nowISO(), updatedBy: user.uid }, owner = is("sales") ? user.uid : "";
       const dealId = doc(collection(db, "deals")).id;
-      await setDoc(doc(db, "deals", dealId), Object.assign({ customer: v.customer, phone: v.phone, area: v.area, location: v.location, package: v.package, source: v.source, items: v.items, quoteUrl: v.quoteUrl, stage: "Delivery scheduled", ownerUid: owner, date: v.closeDate || today(), closeDate: v.closeDate || today(), deliveryDate: v.due, notes: v.notes, createdAt: nowISO(), createdBy: user.uid }, stamp));
+      await setDoc(doc(db, "deals", dealId), Object.assign({ customer: v.customer, phone: v.phone, area: v.area, location: v.location, package: v.package, source: v.source, items: v.items, quoteUrl: v.quoteUrl, quoteFileId: fileIdOf(v.quoteUrl), stage: "Delivery scheduled", ownerUid: owner, date: v.closeDate || today(), closeDate: v.closeDate || today(), deliveryDate: v.due, notes: [v.notes, v.dealNotes].filter(Boolean).join("\n"), createdAt: nowISO(), createdBy: user.uid }, stamp));
       if (moneyOK && (v.value !== "" || v.paid !== "")) await setDoc(doc(db, "dealMoney", dealId), { value: v.value === "" ? 0 : v.value, paid: v.paid === "" ? 0 : v.paid, ownerUid: owner, updatedAt: stamp.updatedAt });
       const title = ("Delivery: " + (v.package || (v.items[0] && v.items[0].name) || "order") + " — " + v.customer).slice(0, 120);
-      await setDoc(doc(collection(db, "tasks")), Object.assign({ title, type: "Delivery", assigneeUid: v.assigneeUid, due: v.due, time: v.time, dealId, customer: v.customer, phone: v.phone, area: v.area, location: v.location, items: v.items, quoteUrl: v.quoteUrl, notes: v.notes, status: "Open", report: "", doneAt: "", notified: false, remindEve: false, remindDay: false, createdAt: nowISO(), createdBy: user.uid }, stamp));
+      await setDoc(doc(collection(db, "tasks")), Object.assign({ title, type: "Delivery", assigneeUid: v.assigneeUid, due: v.due, time: v.time, dealId, customer: v.customer, phone: v.phone, area: v.area, location: v.location, items: v.items, quoteUrl: v.quoteUrl, quoteFileId: fileIdOf(v.quoteUrl), notes: v.notes, status: "Open", report: "", doneAt: "", notified: false, remindEve: false, remindDay: false, createdAt: nowISO(), createdBy: user.uid }, stamp));
       closeForm(); state.calDay = v.due; state.calMonth = v.due.slice(0, 7); setMsg("Delivery saved for " + fmtLong(v.due) + ".");
     } catch (e) { sv.disabled = false; sv.textContent = "Save delivery"; err.textContent = errText(e); }
   };
@@ -582,7 +593,7 @@ const SCHEMAS = {
     { k: "location", l: "Google Maps link or full address", t: "text", wide: 1 },
     { k: "items", l: "Items to deliver", t: "items", wide: 1 },
     { k: "quoteUrl", l: "Quotation link (Google Drive / PDF)", t: "url", wide: 1 },
-    { k: "notes", l: "Details / what to do", t: "area" },
+    { k: "notes", l: "Details / what to do (delivery team sees this, no payment info)", t: "area" },
     { k: "status", l: "Status", t: "select", opts: ["Open", "Done", "Cancelled"], def: "Open" },
     { k: "report", l: "Report from site", t: "area" }] },
   suppliers: { label: "supplier", fields: [
@@ -621,12 +632,13 @@ function mapUrl(t) {
   return q ? "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q + (l ? "" : ", UAE")) : "";
 }
 function waNum(tel) { let n = tel.replace(/^\+/, ""); if (/^0\d{9}$/.test(n)) n = "971" + n.slice(1); return n; }
+const taskHasQuote = t => !!(t && (t.dealId || t.quoteNo || t.quoteFileId || fileIdOf(t.quoteUrl)));
 function taskDetail(t) {
   const tel = String(t.phone || "").replace(/[^\d+]/g, ""), map = mapUrl(t), a = 'style="text-decoration:none"';
   const line = (k, v) => v ? `<div><span class="muted">${k}:</span> ${esc(v)}</div>` : "";
   return `<div class="detail"><div class="row spread"><strong>${esc(t.type || "Task")} · ${t.due ? esc(fmtLong(t.due)) : "No date"}${t.time ? " · " + esc(fmtTime(t.time)) : ""}</strong><span class="pill">${esc(userName(t.assigneeUid) || "Unassigned")}</span></div>
   ${line("Customer", t.customer)}${line("Phone", t.phone)}${line("Address", t.address)}${line("Area", t.area)}${t.location ? `<div style="word-break:break-all"><span class="muted">Location:</span> ${esc(t.location)}</div>` : ""}${line("Details", t.notes)}${itemsHtml(t.items)}
-  <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${String(t.quoteUrl || "").startsWith("https://") ? `<a class="btn" ${a} href="${esc(t.quoteUrl)}" target="_blank" rel="noopener">Quotation</a>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
+  <div class="row" style="margin-top:6px">${tel ? `<a class="btn" ${a} href="tel:${esc(tel)}">Call</a><a class="btn" ${a} href="https://wa.me/${esc(waNum(tel))}" target="_blank" rel="noopener">WhatsApp</a>` : ""}${taskHasQuote(t) ? `<button class="btn" type="button" data-quote-task="${esc(t.id)}">📄 Quotation</button>` : ""}${map ? `<a class="btn primary" ${a} href="${esc(map)}" target="_blank" rel="noopener">Open map</a>` : ""}</div></div>`;
 }
 let pushState = "";
 function pushIsOn() { let t = ""; try { t = localStorage.getItem("rvhq-push") || ""; } catch (e) {} return pushState === "on" || (window.Notification && Notification.permission === "granted" && t && me && (me.fcmTokens || []).includes(t)); }
@@ -666,12 +678,14 @@ function openForm(kind, id) {
   } else if (kind === "tasks") {
     editable = fullTasks(); limited = !editable && rec && rec.assigneeUid === user.uid;
     canDelete = rec && is("owner", "admin", "manager");
+    if (!editable) fields = fields.filter(f => f.k !== "quoteUrl");   // delivery staff: quotation opens in the app, no Drive link
   } else { editable = isAdmin(); canDelete = rec && isAdmin(); }
   const values = {};
   fields.forEach(f => { let v = rec ? (f.money ? (data.money[rec.id] || {})[f.k] : rec[f.k]) : (typeof f.def === "function" ? f.def() : f.def); values[f.k] = v == null ? "" : v; });
   const lim = new Set(["status", "report"]);
   const body = fields.map(f => fieldHtml(f, values[f.k], !(editable || (limited && lim.has(f.k))) || f.fixed)).join("");
-  const detail = kind === "tasks" && rec ? taskDetail(rec) : "";
+  const detail = kind === "tasks" && rec ? taskDetail(rec)
+    : kind === "deals" && rec && (rec.quoteFileId || fileIdOf(rec.quoteUrl)) ? `<div class="detail"><div class="row spread"><strong>Quotation${rec.quoteNo ? " · " + esc(rec.quoteNo) : ""}</strong><button class="btn primary" type="button" data-quote-deal="${esc(rec.id)}">📄 Open quotation</button></div></div>` : "";
   const canSave = editable || limited;
   modal.innerHTML = `<div class="scrim" data-close="1"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="mt"><div class="row spread"><h2 id="mt">${rec ? (canSave ? "Edit" : "View") : "New"} ${esc(sc.label)}</h2><button class="btn" data-close="1" aria-label="Close">✕</button></div>
   ${detail}<form id="frm" class="form">${body}</form><div class="err" id="ferr"></div>
@@ -711,6 +725,8 @@ async function saveRecord(kind, rec, vals, limited) {
   const id = rec ? rec.id : doc(collection(db, kind)).id;
   const base = rec ? Object.assign({}, rec) : { createdAt: nowISO(), createdBy: user.uid };
   delete base.id;
+  if ("quoteUrl" in vals) vals.quoteFileId = fileIdOf(vals.quoteUrl);
+  if (kind === "tasks" && PAY_RE.test(vals.notes || "")) throw userErr(PAY_MSG);
   if (kind === "deals") {
     const money = { value: vals.value, paid: vals.paid };
     delete vals.value; delete vals.paid;
@@ -789,3 +805,137 @@ app.addEventListener("change", async e => {
     catch (err) { t.disabled = false; setMsg(errText(err), true); }
   }
 });
+
+
+// ---------- quotation viewer (PDF opens inside the app; no Google Drive needed) ----------
+let qv = null, pdfLibP = null;
+const QCACHE = "rvhq-quotes";
+function pdfLib() {
+  if (!pdfLibP) pdfLibP = new Promise((ok, no) => {
+    if (window.pdfjsLib) return ok(window.pdfjsLib);
+    const s = document.createElement("script"); s.src = PDFJS + "pdf.min.js";
+    s.onload = () => { if (!window.pdfjsLib) { pdfLibP = null; no(new Error("viewer")); return; } window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.js"; ok(window.pdfjsLib); };
+    s.onerror = () => { pdfLibP = null; s.remove(); no(new Error("viewer")); };
+    document.head.appendChild(s);
+  });
+  return pdfLibP;
+}
+async function qCacheGet(ver) { try { const c = await caches.open(QCACHE), r = await c.match("./__quote/" + encodeURIComponent(ver)); return r ? new Uint8Array(await r.arrayBuffer()) : null; } catch (e) { return null; } }
+async function qCachePut(ver, bytes) {
+  try { const c = await caches.open(QCACHE), keys = await c.keys(); for (const k of keys.slice(0, Math.max(0, keys.length - 24))) await c.delete(k);
+    await c.put("./__quote/" + encodeURIComponent(ver), new Response(bytes, { headers: { "Content-Type": "application/pdf" } })); } catch (e) {}
+}
+function qvEl() {
+  let el = document.getElementById("qv");
+  if (!el) {
+    el = document.createElement("div"); el.id = "qv"; el.className = "qv"; el.hidden = true;
+    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-label", "Quotation");
+    el.innerHTML = `<div class="qv-bar"><button class="btn" type="button" data-qv="back">‹ Back</button><div class="qv-title" id="qvTitle">Quotation</div>
+      <div class="qv-zoom"><button class="btn" type="button" data-qv="out" aria-label="Zoom out">−</button><span class="qv-pct" id="qvPct">100%</span><button class="btn" type="button" data-qv="in" aria-label="Zoom in">+</button><button class="btn" type="button" data-qv="fit">Fit</button></div></div>
+      <div class="qv-body" id="qvBody"></div>`;
+    document.body.appendChild(el);
+    el.addEventListener("click", e => {
+      const b = e.target.closest("[data-qv]"); if (!b || !qv) return;
+      const k = b.dataset.qv;
+      if (k === "back") closeQuote();
+      else if (k === "retry") loadQuote();
+      else if (qv.pdf) { qv.zoom = k === "fit" ? 1 : Math.min(3, Math.max(0.5, Math.round((qv.zoom + (k === "in" ? 0.25 : -0.25)) * 100) / 100)); renderQuote(); }
+    });
+    let rt = 0; window.addEventListener("resize", () => { if (qv && qv.pdf && !el.hidden) { clearTimeout(rt); rt = setTimeout(renderQuote, 200); } });
+  }
+  return el;
+}
+function qvMsg(html) { document.getElementById("qvBody").innerHTML = `<div class="qv-msg">${html}</div>`; }
+function openQuote(ref, title) {
+  const el = qvEl();
+  qv = { ref, title, zoom: 1, pdf: null, seq: 0, rseq: 0 };
+  document.getElementById("qvTitle").textContent = title;
+  document.getElementById("qvPct").textContent = "100%";
+  el.hidden = false; document.body.style.overflow = "hidden";
+  try { history.pushState({ rvq: 1 }, ""); qv.pushed = true; } catch (e) {}
+  loadQuote();
+}
+function closeQuote(fromPop) {
+  const el = document.getElementById("qv"); if (!el || el.hidden) return;
+  el.hidden = true; document.body.style.overflow = ""; document.getElementById("qvBody").innerHTML = "";
+  const pushed = qv && qv.pushed;
+  if (qv && qv.pdf) { try { qv.pdf.destroy(); } catch (e) {} }
+  qv = null;
+  if (!fromPop && pushed) { try { history.back(); } catch (e) {} }
+}
+window.addEventListener("popstate", () => { if (qv) closeQuote(true); });
+async function loadQuote() {
+  const q = qv; if (!q) return;
+  const seq = ++q.seq, alive = () => qv === q && q.seq === seq;
+  qvMsg(`<div class="qv-spin" aria-hidden="true"></div><p>Opening quotation…</p>`);
+  try {
+    const refKey = "rvq:" + q.ref.kind + ":" + q.ref.id;
+    let have = ""; try { have = localStorage.getItem(refKey) || ""; } catch (e) {}
+    const cached = have ? await qCacheGet(have) : null; if (!cached) have = "";
+    const libP = pdfLib(); libP.catch(() => {});
+    let res;
+    try {
+      const token = await user.getIdToken();
+      const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 60000);
+      try {
+        const r = await fetch(HQ_API, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, signal: ctl.signal,
+          body: JSON.stringify({ idToken: token, action: "QUOTE PDF", taskId: q.ref.kind === "task" ? q.ref.id : "", dealId: q.ref.kind === "deal" ? q.ref.id : "", have }) });
+        res = await r.json();
+      } finally { clearTimeout(tm); }
+    } catch (e) {
+      if (cached) res = { ok: true, notModified: true };   // offline: show the copy saved on this phone
+      else throw userErr(navigator.onLine === false ? "No internet. Connect and try again." : "Couldn't reach the server. Check your internet and try again.");
+    }
+    if (!alive()) return;
+    if (!res || !res.ok) throw userErr((res && res.error) || "Couldn't open the quotation.");
+    if (res.quoteNo) document.getElementById("qvTitle").textContent = q.title.replace(/^Quotation/, "Quotation · " + res.quoteNo).replace(" · " + res.quoteNo + " · " + res.quoteNo, " · " + res.quoteNo);
+    let bytes;
+    if (res.notModified && cached) bytes = cached;
+    else {
+      if (!res.pdfBase64) throw userErr("The server sent an empty file. Try again.");
+      const bin = atob(res.pdfBase64); bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      qCachePut(res.version, bytes.slice());
+      try { localStorage.setItem(refKey, res.version); } catch (e) {}
+    }
+    let lib;
+    try { lib = await libP; } catch (e) { throw userErr("The PDF viewer couldn't load. Check your internet and try again."); }
+    if (!alive()) return;
+    let pdf;
+    try { pdf = await lib.getDocument({ data: bytes }).promise; }
+    catch (e) { try { localStorage.removeItem(refKey); } catch (x) {} throw userErr("This quotation file could not be read. It may be damaged. Ask the sales team to send it again."); }
+    if (!alive()) { try { pdf.destroy(); } catch (e) {} return; }
+    q.pdf = pdf; renderQuote();
+  } catch (e) {
+    if (!alive()) return;
+    qvMsg(`<strong>Couldn't open the quotation</strong><p>${esc((e && e.userMsg) || "Something went wrong. Try again.")}</p><div class="row" style="justify-content:center"><button class="btn" type="button" data-qv="back">Back</button><button class="btn primary" type="button" data-qv="retry">Try again</button></div>`);
+  }
+}
+async function renderQuote() {
+  const q = qv; if (!q || !q.pdf) return;
+  const seq = ++q.rseq, body = document.getElementById("qvBody");
+  document.getElementById("qvPct").textContent = Math.round(q.zoom * 100) + "%";
+  const ratioY = body.scrollHeight ? body.scrollTop / body.scrollHeight : 0, ratioX = body.scrollWidth ? body.scrollLeft / body.scrollWidth : 0;
+  const width = Math.max(200, body.clientWidth - 24), wrap = document.createElement("div"); wrap.className = "qv-pages";
+  try {
+    for (let i = 1; i <= q.pdf.numPages; i++) {
+      const page = await q.pdf.getPage(i); if (qv !== q || q.rseq !== seq) return;
+      const scale = width / page.getViewport({ scale: 1 }).width * q.zoom, css = page.getViewport({ scale });
+      let dpr = Math.min(window.devicePixelRatio || 1, 2); while (dpr > 1 && css.width * css.height * dpr * dpr > 16e6) dpr -= 0.25;
+      const vp = page.getViewport({ scale: scale * dpr }), c = document.createElement("canvas");
+      c.className = "qv-page"; c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      c.style.width = Math.floor(css.width) + "px"; c.style.height = Math.floor(css.height) + "px"; c.setAttribute("aria-label", "Page " + i);
+      wrap.appendChild(c);
+      if (i === 1) { body.innerHTML = ""; body.appendChild(wrap); body.scrollTop = ratioY * body.scrollHeight; body.scrollLeft = ratioX * body.scrollWidth; }
+      await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+      if (qv !== q || q.rseq !== seq) return;
+    }
+  } catch (e) { if (qv === q && q.rseq === seq) qvMsg(`<strong>Couldn't show the quotation</strong><p>The file opened but a page could not be drawn. Try again.</p><div class="row" style="justify-content:center"><button class="btn" type="button" data-qv="back">Back</button><button class="btn primary" type="button" data-qv="retry">Try again</button></div>`); }
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-quote-task],[data-quote-deal]"); if (!t) return;
+  e.preventDefault(); e.stopPropagation();
+  if (t.dataset.quoteTask) { const x = byId(data.tasks, t.dataset.quoteTask) || {}; openQuote({ kind: "task", id: t.dataset.quoteTask }, ["Quotation", x.quoteNo, x.customer].filter(Boolean).join(" · ")); }
+  else { const d = byId(data.deals, t.dataset.quoteDeal) || {}; openQuote({ kind: "deal", id: t.dataset.quoteDeal }, ["Quotation", d.quoteNo, d.customer].filter(Boolean).join(" · ")); }
+}, true);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && qv) { e.stopImmediatePropagation(); closeQuote(); } }, true);

@@ -152,6 +152,22 @@ body .cal .c-vis{background:var(--mint);border-color:color-mix(in srgb,var(--goo
 /* visit cards (specialist) */
 section#view > .panel[style*="margin-bottom"]{box-shadow:inset 4px 0 0 var(--gold),var(--shadow)}
 
+/* quotation viewer (opens inside the app) */
+.qv{position:fixed;inset:0;z-index:40;background:#2A2E2B;display:flex;flex-direction:column}
+.qv[hidden]{display:none}
+.qv-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:calc(env(safe-area-inset-top,0px) + 8px) max(12px,env(safe-area-inset-right,0px)) 8px max(12px,env(safe-area-inset-left,0px));background:var(--surface);border-bottom:1px solid var(--line)}
+.qv-title{flex:1;min-width:120px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qv-zoom{display:flex;align-items:center;gap:6px}
+.qv-zoom .btn{padding:7px 12px;min-width:40px;justify-content:center}
+.qv-pct{min-width:46px;text-align:center;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.qv-body{flex:1;overflow:auto;padding:12px 12px calc(env(safe-area-inset-bottom,0px) + 16px);-webkit-overflow-scrolling:touch;display:flex;flex-direction:column}
+.qv-pages{width:max-content;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.qv-page{display:block;background:#fff;border-radius:3px;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+.qv-msg{margin:auto;background:var(--surface);border-radius:16px;padding:22px 20px;max-width:380px;width:100%;text-align:center;box-shadow:var(--shadow-up)}
+.qv-msg p{color:var(--muted);margin:8px 0 14px}
+.qv-spin{width:34px;height:34px;margin:4px auto 0;border-radius:50%;border:3px solid var(--line);border-top-color:var(--brand);animation:qvs .8s linear infinite}
+@keyframes qvs{to{transform:rotate(360deg)}}
+
 @media (max-width:520px){.form{grid-template-columns:1fr}.brand small{display:none}.who span{display:none}h2{font-size:22px}.kpis{grid-template-columns:1fr 1fr;gap:10px}.kpi .v{font-size:20px}.kpi.hero{grid-column:1/-1}body .cal{gap:3px}body .cal .day{border-radius:8px}}
 @media (prefers-reduced-motion:no-preference){.sheet{animation:up .18s ease-out}@keyframes up{from{transform:translateY(10px);opacity:.6}}}
 </style>
